@@ -1627,7 +1627,13 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             const auto info = read(cx, 0x31c + slot * 0xfu);
             Require((info & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
             const auto number = (info >> 8u) & 7u;
-            Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "blending unclamped normalized color is unsupported");
+            if ((info & 0x8000u) == 0 && number != 7 && number != 4 && number != 5) {
+                static bool reported = false;
+                if (!reported) {
+                    reported = true;
+                    std::fprintf(stderr, "[gpu] blending into unclamped normalized color targets clamps the source (CB_COLOR_INFO=0x%08x)%s", info, "\n");
+                }
+            }
             const bool opaqueDestination = (read(cx, 0x31d + slot * 0xfu) & 0x20000u) != 0;
             if (reversed) {
                 const auto translated = TranslateReversedBlend(blend, mapping, color.format, opaqueDestination);
