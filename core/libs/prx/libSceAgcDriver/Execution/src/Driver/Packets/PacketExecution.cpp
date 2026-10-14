@@ -552,7 +552,15 @@ void Driver::execute(const Submission& submission) {
         if (profilePackets) packetProfile.flushMs += std::chrono::duration<double, std::milli>(packetTimer.start - flushStart).count();
 
         bool wroteOnGpu = false, endOfPipeInterrupt = false, interruptDeferred = false, drawPacket = false, sampleDump = false;
-        const bool drains = preparePacketMemory(submission, queue, packet, header, opcode, wroteOnGpu, endOfPipeInterrupt, interruptDeferred, drawPacket, sampleDump);
+        bool drains = false;
+        try {
+            drains = preparePacketMemory(submission, queue, packet, header, opcode, wroteOnGpu, endOfPipeInterrupt, interruptDeferred, drawPacket, sampleDump);
+        } catch (const std::exception& error) {
+            const bool work = opcode == 0x15 || opcode == 0x16 || Pm4::DrawOpcode(opcode);
+            if (!work || !SkipFailedWork("packet memory preparation", error)) throw;
+            cursor = nextCursor;
+            continue;
+        }
         traceLabel(packet, submission.queue);
         timing.Mark("prepare_memory");
 

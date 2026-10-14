@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/SubmissionRing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
@@ -290,6 +291,13 @@ void Driver::run(std::uint32_t id) noexcept {
         submission = Submission{};
     } catch (...) {
         const auto error = std::current_exception();
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& failure) {
+            std::fprintf(stderr, "[local-failure] queue 0x%x worker failed in submission %llu: %.600s\n", id, static_cast<unsigned long long>(submission.serial), failure.what());
+        } catch (...) {
+            std::fprintf(stderr, "[local-failure] queue 0x%x worker failed with a non-standard exception\n", id);
+        }
         for (const auto& [offset, flip] : submission.flips) flip->Fail(error);
         ReportFailure(error);
     }
