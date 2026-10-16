@@ -1252,6 +1252,32 @@ void boundOverflow(const Context& context) {
     }
 }
 
+// APS5_LOCAL_MAX_TEXTURE_MIB (default 2048; 0 = no limit): a sampled surface larger than that is refused
+// before anything reads it (a table entry is rejected like an unmapped one, a direct binding fails its
+// draw or dispatch). No PS5 texture comes near it; Yotei main35 decoded one entry of 0x80001df900's
+// tables as a 20 GB surface, twice, which read ~78 GB of guest memory into host-memory images and
+// stalled the game for 2.5 minutes. The first refusals are printed with their descriptor words.
+void requireTextureSize(std::span<const std::uint32_t> words, const GuestTextureResource& resource, std::uint64_t guestBytes) {
+    static const std::uint64_t limit = [] {
+        const char* text = std::getenv("APS5_LOCAL_MAX_TEXTURE_MIB");
+        return (text != nullptr ? std::strtoull(text, nullptr, 10) : 2048ull) << 20u;
+    }();
+    if (limit == 0 || guestBytes <= limit) return;
+    static std::atomic<int> printed{0};
+    if (printed.fetch_add(1, std::memory_order_relaxed) < 20) {
+        std::string text;
+        for (const auto word : words) {
+            char hex[12];
+            std::snprintf(hex, sizeof(hex), " %08x", word);
+            text += hex;
+        }
+        std::fprintf(stderr, "[texture-limit] refused 0x%llx: %llu bytes, %ux%u depth/last array %u mips %u dimension %d format %u tile %d; words%s\n", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(guestBytes), resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, static_cast<int>(resource.dimension), resource.format, static_cast<int>(resource.tileMode), text.c_str());
+    }
+    char message[160];
+    std::snprintf(message, sizeof(message), "AGC graphics: the sampled surface at 0x%llx (0x%llx bytes) exceeds APS5_LOCAL_MAX_TEXTURE_MIB", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(guestBytes));
+    throw std::runtime_error(message);
+}
+
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& requested, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D) {
     const auto resource = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
     if (resource.baseAddress != requested.baseAddress) guestBytes = 0;
@@ -1301,6 +1327,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         return cachedTexture(context, words, window, components, 0, depthCompare);
     }
     if (guestBytes == 0) guestBytes = DescribeSurface(resource).guestBytes;
+    requireTextureSize(words, resource, guestBytes);
     if (guestBytes >= (1ull << 30u)) {
         static std::atomic<std::uint64_t> large{0};
         const auto count = large.fetch_add(1) + 1;
@@ -6599,6 +6626,7 @@ void ShaderResources::resolveImageTables() {
                 const bool depth1D = depthCompare && ((shape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k1D) || (shape == ShaderRecompiler::DescriptorImageShape::Image2DArray && resource.dimension == TextureDimension::k1DArray));
                 if (!firstLayer && !depth1D && !MatchesGuestDimension(shape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the table entry's image shape (shape " + std::to_string(static_cast<int>(shape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
                 guestBytes = DescribeSurface(resource).guestBytes;
+                requireTextureSize(words, resource, guestBytes);
                 if (!GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(guestBytes)) && GuestMemory::CommittedRanges(resource.baseAddress, static_cast<std::size_t>(guestBytes), false).empty()) throw std::runtime_error("AGC graphics: the table entry's surface at 0x" + HexText(resource.baseAddress) + " (0x" + HexText(guestBytes) + " bytes) is not mapped");
                 static_cast<void>(ResolveTextureFormat(resource.format));
             } catch (const std::runtime_error& error) {
