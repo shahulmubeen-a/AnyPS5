@@ -80,6 +80,18 @@ GuestHookHandler FindHandler(const char* name) {
 std::uintptr_t g_imageBase = 0;
 std::uintptr_t g_elf0 = 0;
 std::size_t g_elf0Size = 0;
+std::vector<GuestImageSection> g_sections;
+std::vector<std::uintptr_t> g_sectionHosts;
+
+bool GuestSectionName(const BYTE* name) {
+    if (std::memcmp(name, ".elf", 4) != 0 || name[4] < '0' || name[4] > '9') return false;
+    std::size_t index = 5;
+    while (index < IMAGE_SIZEOF_SHORT_NAME && name[index] >= '0' && name[index] <= '9') ++index;
+    while (index < IMAGE_SIZEOF_SHORT_NAME) {
+        if (name[index++] != 0) return false;
+    }
+    return true;
+}
 
 void FindGuestImage() {
     if (g_elf0 != 0) return;
@@ -88,15 +100,33 @@ void FindGuestImage() {
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-    const auto* section = IMAGE_FIRST_SECTION(nt);
-    for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section) {
-        if (std::memcmp(section->Name, ".elf0\0\0\0", 8) == 0) {
-            g_imageBase = base;
-            g_elf0 = base + section->VirtualAddress;
-            g_elf0Size = section->Misc.VirtualSize;
-            return;
-        }
+    const auto* first = IMAGE_FIRST_SECTION(nt);
+    const IMAGE_SECTION_HEADER* elf0 = nullptr;
+    for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index) {
+        if (std::memcmp(first[index].Name, ".elf0\0\0\0", 8) == 0) elf0 = &first[index];
     }
+    if (elf0 == nullptr) return;
+    g_imageBase = base;
+    g_elf0 = base + elf0->VirtualAddress;
+    g_elf0Size = elf0->Misc.VirtualSize;
+    for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index) {
+        const auto& section = first[index];
+        if (!GuestSectionName(section.Name) || section.VirtualAddress < elf0->VirtualAddress) continue;
+        GuestImageSection entry{section.VirtualAddress - elf0->VirtualAddress, section.Misc.VirtualSize, section.Characteristics, {}};
+        std::memcpy(entry.name, section.Name, IMAGE_SIZEOF_SHORT_NAME);
+        g_sections.push_back(entry);
+        g_sectionHosts.push_back(base + section.VirtualAddress);
+    }
+}
+
+bool Readable(DWORD protect) {
+    const DWORD kind = protect & 0xff;
+    return (protect & PAGE_GUARD) == 0 && (kind == PAGE_READONLY || kind == PAGE_READWRITE || kind == PAGE_WRITECOPY || kind == PAGE_EXECUTE_READ || kind == PAGE_EXECUTE_READWRITE || kind == PAGE_EXECUTE_WRITECOPY);
+}
+
+bool Executable(DWORD protect) {
+    const DWORD kind = protect & 0xff;
+    return kind == PAGE_EXECUTE || kind == PAGE_EXECUTE_READ || kind == PAGE_EXECUTE_READWRITE || kind == PAGE_EXECUTE_WRITECOPY;
 }
 
 std::string DescribeAddress(std::uint64_t address) {
@@ -258,6 +288,8 @@ void LoadTable() {
         std::vector<std::uint8_t> replacement;
         std::string why;
         std::uint64_t va = 0;
+        std::uintptr_t host = 0;
+        const char* sectionName = "";
         if (!(words >> vaText >> bytesText) || (patch && !(words >> replacementText))) {
             why = patch ? "expected: patch <VA> <expected bytes> <replacement bytes> [label]" : "expected: <handler> <VA> <bytes> [label]";
         } else {
@@ -266,18 +298,28 @@ void LoadTable() {
             if (end == nullptr || *end != '\0') why = "VA is not hexadecimal";
             else if (!ParseHex(bytesText, expected) || expected.size() < (patch ? 1u : 8u)) why = patch ? "expected bytes must be hexadecimal" : "expected bytes must be at least 8 hexadecimal bytes";
             else if (patch && (!ParseHex(replacementText, replacement) || replacement.size() != expected.size())) why = "replacement bytes must be hexadecimal and as long as the expected bytes";
-            else if (va + expected.size() > g_elf0Size) why = "VA is outside the .elf0 section";
+            else {
+                char reason[192] = {};
+                const int index = FindGuestTargetSection_nid_no_patch(g_sections.data(), g_sections.size(), va, expected.size(), !patch, reason, sizeof(reason));
+                if (index < 0) {
+                    why = reason;
+                } else {
+                    const auto& section = g_sections[static_cast<std::size_t>(index)];
+                    host = g_sectionHosts[static_cast<std::size_t>(index)] + static_cast<std::uintptr_t>(va - section.va);
+                    sectionName = section.name;
+                }
+            }
         }
         std::getline(words >> std::ws, label);
         if (label.empty()) label = handler + "@" + vaText;
         if (why.empty()) {
             char reason[256] = {};
-            if (patch && ApplyGuestPatch_nid_no_patch(reinterpret_cast<void*>(g_elf0 + va), expected.data(), replacement.data(), expected.size(), reason, sizeof(reason))) {
+            if (patch && ApplyGuestPatch_nid_no_patch(reinterpret_cast<void*>(host), expected.data(), replacement.data(), expected.size(), reason, sizeof(reason))) {
                 ++patched;
-                Print(("[hooks] patch " + label + " at VA 0x" + vaText + ": " + Hex(expected.data(), expected.size()) + " -> " + Hex(replacement.data(), replacement.size()) + "\n").c_str());
+                Print(("[hooks] patch " + label + " at VA 0x" + vaText + " (" + sectionName + "): " + Hex(expected.data(), expected.size()) + " -> " + Hex(replacement.data(), replacement.size()) + "\n").c_str());
                 continue;
             }
-            if (!patch && InstallGuestHook_nid_no_patch(reinterpret_cast<void*>(g_elf0 + va), expected.data(), expected.size(), handler.c_str(), label.c_str(), va, reason, sizeof(reason))) {
+            if (!patch && InstallGuestHook_nid_no_patch(reinterpret_cast<void*>(host), expected.data(), expected.size(), handler.c_str(), label.c_str(), va, reason, sizeof(reason))) {
                 ++installed;
                 continue;
             }
@@ -486,21 +528,64 @@ bool ApplyGuestPatch_nid_no_patch(void* address, const std::uint8_t* expected, c
         return false;
     }
     auto* target = static_cast<std::uint8_t*>(address);
+    struct Span {
+        std::uint8_t* start;
+        std::size_t bytes;
+        DWORD protect;
+        DWORD previous;
+    };
+    std::vector<Span> spans;
+    for (std::size_t done = 0; done < bytes;) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQuery(target + done, &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT || !Readable(region.Protect)) {
+            Explain(why, whyBytes, "the target is not committed readable memory at +" + std::to_string(done));
+            return false;
+        }
+        const auto* regionEnd = static_cast<const std::uint8_t*>(region.BaseAddress) + region.RegionSize;
+        const auto length = std::min<std::size_t>(bytes - done, static_cast<std::size_t>(regionEnd - (target + done)));
+        spans.push_back({target + done, length, region.Protect, 0});
+        done += length;
+    }
     if (std::memcmp(target, expected, bytes) != 0) {
         Explain(why, whyBytes, std::string("bytes differ: found ") + Hex(target, bytes) + ", expected " + Hex(expected, bytes));
         return false;
     }
     std::lock_guard lock(g_installMutex);
-    DWORD old = 0;
-    if (!VirtualProtect(target, bytes, PAGE_EXECUTE_READWRITE, &old)) {
-        Explain(why, whyBytes, "VirtualProtect failed");
+    std::size_t opened = 0;
+    while (opened < spans.size() && VirtualProtect(spans[opened].start, spans[opened].bytes, Executable(spans[opened].protect) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, &spans[opened].previous)) ++opened;
+    if (opened == spans.size()) std::memcpy(target, replacement, bytes);
+    for (std::size_t index = 0; index < opened; ++index) {
+        DWORD ignored = 0;
+        VirtualProtect(spans[index].start, spans[index].bytes, spans[index].previous, &ignored);
+        if (Executable(spans[index].protect)) FlushInstructionCache(GetCurrentProcess(), spans[index].start, spans[index].bytes);
+    }
+    if (opened != spans.size()) {
+        Explain(why, whyBytes, "VirtualProtect failed at +" + std::to_string(spans[opened].start - target));
         return false;
     }
-    std::memcpy(target, replacement, bytes);
-    DWORD ignored = 0;
-    VirtualProtect(target, bytes, old, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), target, bytes);
     return true;
+}
+
+int FindGuestTargetSection_nid_no_patch(const GuestImageSection* sections, std::size_t count, std::uint64_t va, std::size_t bytes, bool hook, char* why, std::size_t whyBytes) {
+    if ((sections == nullptr && count != 0) || bytes == 0) {
+        Explain(why, whyBytes, "bad arguments");
+        return -1;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& section = sections[index];
+        if (va < section.va || va - section.va >= section.size) continue;
+        if (bytes > section.size - (va - section.va)) {
+            Explain(why, whyBytes, std::string("the range crosses the end of section ") + section.name);
+            return -1;
+        }
+        if (hook && (section.characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) {
+            Explain(why, whyBytes, std::string("entry hooks need an executable section, not ") + section.name);
+            return -1;
+        }
+        return static_cast<int>(index);
+    }
+    Explain(why, whyBytes, hook ? "VA is outside every executable guest section" : "VA is outside every guest section");
+    return -1;
 }
 
 void APS5_VABI GuestHookDispatch_nid_no_patch(void* record, GuestHookContext* context) {

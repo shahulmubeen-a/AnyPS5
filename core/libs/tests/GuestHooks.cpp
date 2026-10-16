@@ -168,6 +168,48 @@ int main() {
     MEMORY_BASIC_INFORMATION page{};
     Require(VirtualQuery(table, &page, sizeof(page)) == sizeof(page) && page.Protect == PAGE_READONLY);
 
+    // A patch across a read-only page and a data page writes both and leaves each page its protection
+    // (no execute bit on data); memory without read access is refused before anything is read or written.
+    auto* pages = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 3 * 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(pages != nullptr);
+    std::memset(pages, 0x11, 3 * 4096);
+    Require(VirtualProtect(pages, 4096, PAGE_READONLY, &previous));
+    Require(VirtualProtect(pages + 2 * 4096, 4096, PAGE_NOACCESS, &previous));
+    const std::uint8_t before[8] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11};
+    const std::uint8_t after[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    Require(ApplyGuestPatch_nid_no_patch(pages + 4096 - 4, before, after, sizeof(after), why, sizeof(why)));
+    Require(std::memcmp(pages + 4096 - 4, after, sizeof(after)) == 0);
+    Require(VirtualQuery(pages, &page, sizeof(page)) == sizeof(page) && page.Protect == PAGE_READONLY);
+    Require(VirtualQuery(pages + 4096, &page, sizeof(page)) == sizeof(page) && page.Protect == PAGE_READWRITE);
+    Require(!ApplyGuestPatch_nid_no_patch(pages + 2 * 4096, before, after, sizeof(after), why, sizeof(why)));
+    Require(std::strstr(why, "not committed readable memory at +0") != nullptr);
+    Require(!ApplyGuestPatch_nid_no_patch(pages + 2 * 4096 - 4, before, after, sizeof(after), why, sizeof(why)));
+    Require(std::strstr(why, "not committed readable memory at +4") != nullptr);
+    Require(std::memcmp(pages + 2 * 4096 - 4, before, 4) == 0);
+    Require(VirtualQuery(pages + 2 * 4096, &page, sizeof(page)) == sizeof(page) && page.Protect == PAGE_NOACCESS);
+
+    // Patch and hook targets in app.exe's guest sections, laid out as the relinker writes Yotei's eboot:
+    // code, a gap without a section, read-only data, data.
+    const GuestImageSection sections[] = {
+        {0x0, 0x17e9000, IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ, ".elf0"},
+        {0x17ec000, 0x4a8000, IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ, ".elf2"},
+        {0x1c94000, 0x54ea000, IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE, ".elf3"},
+    };
+    constexpr std::size_t sectionCount = sizeof(sections) / sizeof(sections[0]);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0xde020b, 5, false, why, sizeof(why)) == 0);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0xde5ae0, 16, true, why, sizeof(why)) == 0);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x1af8190, 128, false, why, sizeof(why)) == 1);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x213d794, 4, false, why, sizeof(why)) == 2);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x17e9800, 4, false, why, sizeof(why)) == -1);
+    Require(std::strstr(why, "outside every guest section") != nullptr);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x17ec000 + 0x4a8000 - 2, 4, false, why, sizeof(why)) == -1);
+    Require(std::strstr(why, "crosses the end of section .elf2") != nullptr);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x1af8190, 16, true, why, sizeof(why)) == -1);
+    Require(std::strstr(why, "executable section, not .elf2") != nullptr);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x1c94000 + 0x54ea000, 1, false, why, sizeof(why)) == -1);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, ~0ull - 1, 4, false, why, sizeof(why)) == -1);
+    Require(FindGuestTargetSection_nid_no_patch(sections, sectionCount, 0x213d794, 0, false, why, sizeof(why)) == -1);
+
     std::puts("guest hooks ok");
     return 0;
 }
