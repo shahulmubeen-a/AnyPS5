@@ -244,31 +244,40 @@ void LoadTable() {
     }
     std::string line;
     std::size_t installed = 0;
+    std::size_t patched = 0;
     std::size_t refused = 0;
     std::size_t number = 0;
     while (std::getline(file, line)) {
         ++number;
         if (const auto hash = line.find('#'); hash != std::string::npos) line.resize(hash);
         std::istringstream words(line);
-        std::string handler, vaText, bytesText, label;
+        std::string handler, vaText, bytesText, replacementText, label;
         if (!(words >> handler)) continue;
+        const bool patch = handler == "patch";
         std::vector<std::uint8_t> expected;
+        std::vector<std::uint8_t> replacement;
         std::string why;
         std::uint64_t va = 0;
-        if (!(words >> vaText >> bytesText)) {
-            why = "expected: <handler> <VA> <bytes> [label]";
+        if (!(words >> vaText >> bytesText) || (patch && !(words >> replacementText))) {
+            why = patch ? "expected: patch <VA> <expected bytes> <replacement bytes> [label]" : "expected: <handler> <VA> <bytes> [label]";
         } else {
             char* end = nullptr;
             va = std::strtoull(vaText.c_str(), &end, 16);
             if (end == nullptr || *end != '\0') why = "VA is not hexadecimal";
-            else if (!ParseHex(bytesText, expected) || expected.size() < 8) why = "expected bytes must be at least 8 hexadecimal bytes";
+            else if (!ParseHex(bytesText, expected) || expected.size() < (patch ? 1u : 8u)) why = patch ? "expected bytes must be hexadecimal" : "expected bytes must be at least 8 hexadecimal bytes";
+            else if (patch && (!ParseHex(replacementText, replacement) || replacement.size() != expected.size())) why = "replacement bytes must be hexadecimal and as long as the expected bytes";
             else if (va + expected.size() > g_elf0Size) why = "VA is outside the .elf0 section";
         }
         std::getline(words >> std::ws, label);
         if (label.empty()) label = handler + "@" + vaText;
         if (why.empty()) {
             char reason[256] = {};
-            if (InstallGuestHook_nid_no_patch(reinterpret_cast<void*>(g_elf0 + va), expected.data(), expected.size(), handler.c_str(), label.c_str(), va, reason, sizeof(reason))) {
+            if (patch && ApplyGuestPatch_nid_no_patch(reinterpret_cast<void*>(g_elf0 + va), expected.data(), replacement.data(), expected.size(), reason, sizeof(reason))) {
+                ++patched;
+                Print(("[hooks] patch " + label + " at VA 0x" + vaText + ": " + Hex(expected.data(), expected.size()) + " -> " + Hex(replacement.data(), replacement.size()) + "\n").c_str());
+                continue;
+            }
+            if (!patch && InstallGuestHook_nid_no_patch(reinterpret_cast<void*>(g_elf0 + va), expected.data(), expected.size(), handler.c_str(), label.c_str(), va, reason, sizeof(reason))) {
                 ++installed;
                 continue;
             }
@@ -277,8 +286,8 @@ void LoadTable() {
         ++refused;
         Print(("[hooks] line " + std::to_string(number) + " refused: " + why + "\n").c_str());
     }
-    char summary[160];
-    std::snprintf(summary, sizeof(summary), "[hooks] %zu installed, %zu refused from %s\n", installed, refused, path);
+    char summary[192];
+    std::snprintf(summary, sizeof(summary), "[hooks] %zu installed, %zu patched, %zu refused from %s\n", installed, patched, refused, path);
     Print(summary);
 }
 
@@ -469,6 +478,29 @@ std::uint64_t GuestHookHits_nid_no_patch(const char* label) {
         if (state.label == label) return state.hits.load(std::memory_order_relaxed);
     }
     return 0;
+}
+
+bool ApplyGuestPatch_nid_no_patch(void* address, const std::uint8_t* expected, const std::uint8_t* replacement, std::size_t bytes, char* why, std::size_t whyBytes) {
+    if (address == nullptr || expected == nullptr || replacement == nullptr || bytes == 0) {
+        Explain(why, whyBytes, "bad arguments");
+        return false;
+    }
+    auto* target = static_cast<std::uint8_t*>(address);
+    if (std::memcmp(target, expected, bytes) != 0) {
+        Explain(why, whyBytes, std::string("bytes differ: found ") + Hex(target, bytes) + ", expected " + Hex(expected, bytes));
+        return false;
+    }
+    std::lock_guard lock(g_installMutex);
+    DWORD old = 0;
+    if (!VirtualProtect(target, bytes, PAGE_EXECUTE_READWRITE, &old)) {
+        Explain(why, whyBytes, "VirtualProtect failed");
+        return false;
+    }
+    std::memcpy(target, replacement, bytes);
+    DWORD ignored = 0;
+    VirtualProtect(target, bytes, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), target, bytes);
+    return true;
 }
 
 void APS5_VABI GuestHookDispatch_nid_no_patch(void* record, GuestHookContext* context) {

@@ -15,6 +15,10 @@
 // back into guest code. Built-in handlers: count (hits only, reported every 10 s as "[hooks]"),
 // args (the first APS5_GUEST_HOOKS_LOG calls, default 16, as "[hook]" lines) and dump (args plus
 // 64 bytes at rdi and at rsi).
+// A line `patch <eboot VA, hex> <expected bytes, hex> <replacement bytes, hex> [label]` instead
+// overwrites code or data in place (same length, at least 1 byte) before any guest code runs, for
+// engine settings that live in constants (an immediate, a read-only table); it is refused, and
+// nothing is written, when the bytes at the VA differ from the expected ones.
 
 struct GuestHookContext {
     std::uint8_t ymm[8][32];
@@ -52,6 +56,9 @@ bool RegisterGuestHookHandler_nid_no_patch(const char* name, GuestHookHandler ha
 // Returns false and fills `why` (if given) when the hook is refused.
 bool InstallGuestHook_nid_no_patch(void* address, const std::uint8_t* expected, std::size_t expectedBytes, const char* handler, const char* label, std::uint64_t va, char* why, std::size_t whyBytes);
 std::uint64_t GuestHookHits_nid_no_patch(const char* label);
+// Overwrites `bytes` bytes at a host address with `replacement` when they equal `expected` (any page
+// protection; restored afterwards). Returns false and fills `why` (if given) when refused.
+bool ApplyGuestPatch_nid_no_patch(void* address, const std::uint8_t* expected, const std::uint8_t* replacement, std::size_t bytes, char* why, std::size_t whyBytes);
 // The instruction whitelist the patcher relocates (exposed for tests; yotei-work's hookbytes.py mirrors it).
 bool DecodeGuestHookInstruction_nid_no_patch(const std::uint8_t* code, std::size_t available, GuestHookInstruction* out);
 }

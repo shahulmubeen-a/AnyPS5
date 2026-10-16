@@ -144,6 +144,30 @@ int main() {
     Require(reinterpret_cast<Floats>(floats)(0.5f, 0.25f) == 0.75f);
     Require(g_lateCalls == 1 && GuestHookHits_nid_no_patch("floats") == 2);
 
+    // Patches: an immediate in code, and a table on a read-only page (protection restored).
+    auto* immediate = code + 320;
+    Emit(immediate, {0xb8, 0x00, 0x0f, 0x00, 0x00, 0xc3, 0xcc, 0xcc});
+    FlushInstructionCache(GetCurrentProcess(), immediate, 8);
+    Require(reinterpret_cast<Nullary>(immediate)() == 0xf00);
+    const std::uint8_t wide[] = {0x00, 0x0f, 0x00, 0x00};
+    const std::uint8_t narrow[] = {0x80, 0x07, 0x00, 0x00};
+    Require(ApplyGuestPatch_nid_no_patch(immediate + 1, wide, narrow, sizeof(wide), why, sizeof(why)));
+    Require(reinterpret_cast<Nullary>(immediate)() == 0x780);
+    Require(!ApplyGuestPatch_nid_no_patch(immediate + 1, wide, narrow, sizeof(wide), why, sizeof(why)));
+    Require(std::strstr(why, "bytes differ") != nullptr && reinterpret_cast<Nullary>(immediate)() == 0x780);
+    auto* table = static_cast<std::uint32_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(table != nullptr);
+    table[0] = 3840;
+    table[1] = 2160;
+    DWORD previous = 0;
+    Require(VirtualProtect(table, 4096, PAGE_READONLY, &previous));
+    const std::uint32_t large[] = {3840, 2160};
+    const std::uint32_t small[] = {1920, 1080};
+    Require(ApplyGuestPatch_nid_no_patch(table, reinterpret_cast<const std::uint8_t*>(large), reinterpret_cast<const std::uint8_t*>(small), sizeof(large), why, sizeof(why)));
+    Require(table[0] == 1920 && table[1] == 1080);
+    MEMORY_BASIC_INFORMATION page{};
+    Require(VirtualQuery(table, &page, sizeof(page)) == sizeof(page) && page.Protect == PAGE_READONLY);
+
     std::puts("guest hooks ok");
     return 0;
 }
