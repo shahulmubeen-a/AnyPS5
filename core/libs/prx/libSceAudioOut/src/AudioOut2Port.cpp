@@ -246,7 +246,10 @@ int APS5_VABI sceAudioOut2PortGetState(AudioOut2PortHandle port, AudioOut2PortSt
     if (!state) return SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT;
     *state = AudioOut2PortState{};
     state->output = OUTPUT_MAIN;
-    state->num_channels = static_cast<std::uint8_t>(entry->channels);
+    // local-debug: Ghost of Yotei's Scream worker divides by a byte it takes from the port state and
+    // crashes (0xc0000094) since 72fae2087 reports the port's own channel count here; the output's
+    // channel count, as before, keeps it running.
+    state->num_channels = static_cast<std::uint8_t>(AUDIO_OUT2_OUTPUT_CHANNELS);
     state->volume = VOLUME_MAX;
     return 0;
 } catch (const ProcessShutdown&) {
