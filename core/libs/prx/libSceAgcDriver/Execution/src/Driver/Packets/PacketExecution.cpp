@@ -22,6 +22,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -230,6 +231,18 @@ bool sealsWriteOnly(std::span<const std::uint32_t> packet, std::uint32_t opcode)
 bool& drawnSinceSeal() {
     static thread_local bool drawn = false;
     return drawn;
+}
+
+bool SkipFailedWork(const char* kind, const std::exception& error) {
+    static const bool enabled = std::getenv("APS5_LOCAL_SKIP_FAILED_WORK") != nullptr;
+    if (!enabled) return false;
+    static std::mutex mutex;
+    static std::set<std::string> reported;
+    std::string message(error.what());
+    if (message.size() > 240) message.resize(240);
+    std::lock_guard lock(mutex);
+    if (reported.insert(std::string(kind) + message).second) std::fprintf(stderr, "[local-skip] %s skipped: %s\n", kind, message.c_str());
+    return true;
 }
 
 }
@@ -636,6 +649,9 @@ void Driver::execute(const Submission& submission) {
                     CaptureTrace::Log("dispatch-refused submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, refusal.what());
                     pendingDispatchPhases().outcome = DispatchOutcome::Skipped;
                     reportSkip("dispatch", refusal.what());
+                } catch (const std::exception& error) {
+                    if (!SkipFailedWork("dispatch", error)) throw;
+                    pendingDispatchPhases().outcome = DispatchOutcome::Skipped;
                 }
             });
             Pm4::NoteDispatchRegisters(packet, queue);
@@ -697,7 +713,7 @@ void Driver::execute(const Submission& submission) {
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
-                    throw;
+                    if (!SkipFailedWork("draw", error)) throw;
                 }
             });
             finishDrawPacket(drawn);
