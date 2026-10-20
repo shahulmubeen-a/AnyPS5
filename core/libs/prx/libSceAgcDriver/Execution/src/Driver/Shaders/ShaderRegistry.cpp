@@ -1476,6 +1476,23 @@ std::unique_ptr<RegisteredPreparation> PlanRegistered(const ShaderSnapshot& snap
     } catch (const ShaderRecompiler::UnsupportedInstructionError& error) {
         if (deferred == nullptr) throw;
         return defer(error.what());
+    } catch (const std::exception& error) {
+        // local-debug: any other decode failure (an encoding the decoder does not know) defers to the
+        // first use under APS5_LOCAL_SKIP_FAILED_WORK, where the draw or dispatch is skipped, instead
+        // of escaping to the title's registering thread. The words around the failing pc are logged.
+        if (deferred == nullptr || !SkipFailedWork("registration decode", error)) throw;
+        std::uint32_t pc = 0;
+        if (const char* at = std::strstr(error.what(), "program counter 0x")) pc = static_cast<std::uint32_t>(std::strtoul(at + 18, nullptr, 16));
+        const std::size_t word = pc / 4u;
+        const std::size_t first = word >= 32u ? word - 32u : 0u;
+        std::string words;
+        for (std::size_t i = first; i < code.size() && i < word + 4u; ++i) {
+            char text[16];
+            std::snprintf(text, sizeof(text), "%s%08x", i == word ? " >" : " ", static_cast<unsigned>(code[i]));
+            words += text;
+        }
+        std::fprintf(stderr, "[local-decode] shader 0x%llx type %u entry +0x%zx (%zu words): %s; words from pc 0x%zx:%s\n", static_cast<unsigned long long>(snapshot.codeAddress), static_cast<unsigned>(snapshot.type), codeOffset * 4u, code.size(), error.what(), first * 4u, words.c_str());
+        return defer(error.what());
     }
     std::optional<ShaderRecompiler::ShaderComputeStageInfo> compute;
     std::optional<ShaderRecompiler::ShaderPixelStageInfo> pixel;
@@ -2550,11 +2567,23 @@ void Driver::RegisterShader(const Shader* shader) {
     registered.context = snapshot.registeredState->context;
     registered.userConfig = snapshot.registeredState->userConfig;
     std::shared_ptr<RegisteredPreparation> preparation;
+    // local-debug: a plan failure at registration defers to the first use under
+    // APS5_LOCAL_SKIP_FAILED_WORK (see PlanRegistered).
+    const auto planOrDefer = [&]() -> std::unique_ptr<RegisteredPreparation> {
+        try {
+            return PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred);
+        } catch (const std::exception& error) {
+            if (!SkipFailedWork("registration plan", error)) throw;
+            APS5_LOG_ERR("Shader 0x%llx could not be planned at registration (%s); preparing it when it is used", static_cast<unsigned long long>(snapshot.codeAddress), error.what());
+            snapshot.prepared->deferred = true;
+            return nullptr;
+        }
+    };
     if (LazyShaderPreparation()) {
-        static_cast<void>(PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred));
+        static_cast<void>(planOrDefer());
         snapshot.prepared->deferred = true;
     } else if (AsyncRegistrationPrepare()) {
-        preparation = PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred);
+        preparation = planOrDefer();
         if (preparation != nullptr) preparation->prebuildDevice = localDevice;
         if (preparation != nullptr && (snapshot.type == 0 || snapshot.type == 1)) BuildRegisteredAbiKey(registered, *localDevice, preparation->abiKey);
         snapshot.prepared->pending = preparation != nullptr;
