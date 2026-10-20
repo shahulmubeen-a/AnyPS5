@@ -1716,11 +1716,6 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             Require(addition(state.colorBlendOp) && addition(state.alphaBlendOp), "dual-source blending with a MIN or MAX operation is unsupported");
             result.dualSourceBlend = true;
         }
-        if (const auto info = read(cx, 0x31c + slot * 0xfu); state.blendEnable && (info & 0x8000u) == 0 && ((info >> 8u) & 7u) <= 1u) {
-            char detail[80];
-            std::snprintf(detail, sizeof(detail), " (CB_COLOR_INFO 0x%08x, CB_BLEND%u_CONTROL 0x%08x)", info, slot, blend);
-            throw std::runtime_error(std::string("AGC graphics: blending unclamped normalized color is not implemented") + detail);
-        }
         result.blends[color.exportIndex] = state;
     }
     for (std::uint32_t i = 0; i < 3; ++i) {
