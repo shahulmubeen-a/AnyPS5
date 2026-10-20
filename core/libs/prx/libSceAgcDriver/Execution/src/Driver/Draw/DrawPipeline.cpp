@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
@@ -554,9 +555,11 @@ void DrawPipeline::run() {
         try {
             if (commit != nullptr) (*commit)();
             if (!isDraw) GuestMemory::BreakProofs();
-        } catch (const std::exception&) {
-            failed = true;
-            fatal = std::current_exception();
+        } catch (const std::exception& error) {
+            if (!SkipFailedWork("pipelined draw", error)) {
+                failed = true;
+                fatal = std::current_exception();
+            }
         } catch (const ProcessShutdown&) {
             shutdown = true;
             fatal = std::current_exception();

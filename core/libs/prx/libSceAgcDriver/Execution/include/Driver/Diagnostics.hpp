@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,10 @@ void require(bool condition, const char* reason);
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset);
 
 std::uint32_t readUserData(const Registers& shader, std::uint32_t offset);
+
+// local-debug: under APS5_LOCAL_SKIP_FAILED_WORK a draw, dispatch or packet preparation that threw is
+// logged once per message and skipped instead of stopping the queue.
+bool SkipFailedWork(const char* kind, const std::exception& error);
 
 // A program the recompiler refused when its draw or dispatch used it. With APS5_SKIP_REFUSED_SHADERS
 // the queue worker skips that packet and reports the refusal once; otherwise it fails the queue.

@@ -233,6 +233,8 @@ bool& drawnSinceSeal() {
     return drawn;
 }
 
+}
+
 bool SkipFailedWork(const char* kind, const std::exception& error) {
     static const bool enabled = std::getenv("APS5_LOCAL_SKIP_FAILED_WORK") != nullptr;
     if (!enabled) return false;
@@ -243,8 +245,6 @@ bool SkipFailedWork(const char* kind, const std::exception& error) {
     std::lock_guard lock(mutex);
     if (reported.insert(std::string(kind) + message).second) std::fprintf(stderr, "[local-skip] %s skipped: %s\n", kind, message.c_str());
     return true;
-}
-
 }
 
 void Driver::deliverGuestEopInterrupt(std::uint32_t queue) {
