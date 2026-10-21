@@ -25,6 +25,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -2472,6 +2473,42 @@ std::string WaitedBehindReport(const HolderMatrixValues& waited) {
 
 namespace {
 std::atomic<std::uint64_t> gpuHoldSerial{0};
+
+bool GpuLockPriorityEnabled() {
+    static const bool enabled = std::getenv("APS5_GPU_LOCK_PRIORITY") != nullptr;
+    return enabled;
+}
+
+thread_local bool gpuLockPriority = false;
+// Priority threads inside lock() that do not hold the mutex yet.
+std::atomic<std::uint32_t> gpuLockPriorityWaiters{0};
+
+// Placed before an acquisition the calling thread does not already hold (a recursive acquisition
+// never waits here, so a holder cannot be held up behind a waiter that waits for it): a priority
+// thread counts itself as a waiter until the acquisition returns, any other thread first waits until
+// no priority thread is waiting.
+struct GpuLockPriorityGate {
+    bool counted = false;
+    explicit GpuLockPriorityGate(bool held) {
+        if (held || !GpuLockPriorityEnabled()) return;
+        if (gpuLockPriority) {
+            gpuLockPriorityWaiters.fetch_add(1, std::memory_order_acq_rel);
+            counted = true;
+            return;
+        }
+        for (std::uint32_t spins = 0; gpuLockPriorityWaiters.load(std::memory_order_acquire) != 0; ++spins) {
+            if (spins < 512) SpinPause();
+            else std::this_thread::yield();
+        }
+    }
+    ~GpuLockPriorityGate() {
+        if (counted) gpuLockPriorityWaiters.fetch_sub(1, std::memory_order_acq_rel);
+    }
+};
+}
+
+void MarkGpuLockPriorityThread() {
+    gpuLockPriority = true;
 }
 
 void GpuMutexType::enter() {
@@ -2491,6 +2528,7 @@ void GpuMutexType::acquired() {
 }
 
 bool GpuMutexType::try_lock() {
+    if (GpuLockPriorityEnabled() && !gpuLockPriority && gpuLockPriorityWaiters.load(std::memory_order_acquire) != 0 && !HeldByThisThread()) return false;
     if (!GpuLockProfiled()) {
         if (!tryEnter()) return false;
         acquired();
@@ -2554,6 +2592,7 @@ void AssertGpuLockHeld(const char* where) {
 }
 
 void GpuMutexType::lock() {
+    const GpuLockPriorityGate gate(HeldByThisThread());
     if (!GpuLockProfiled()) {
         auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
         if (trace == nullptr) {
@@ -2688,6 +2727,7 @@ GpuMutexType& GpuMutex() {
 
 void TagGpuLockThread(std::uint32_t queue) {
     LockStats().tag = queue;
+    if (queue == 0) MarkGpuLockPriorityThread();
 }
 
 unsigned long long CodeOffset(const void* address) {

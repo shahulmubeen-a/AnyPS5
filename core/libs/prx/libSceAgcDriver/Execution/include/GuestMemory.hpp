@@ -222,6 +222,10 @@ void TagGpuLockThread(std::uint32_t queue);
 // The presenter stays untagged (its tag is a queue id to the recorder) but takes its own column
 // of the [lock] holder matrix, apart from the game threads.
 void MarkPresenterThread();
+// APS5_GPU_LOCK_PRIORITY: queue 0's packet worker and the draw committer carry the frame's critical path,
+// so while one of them waits for GpuMutex another thread's lock() or try_lock() stands back until it got
+// through. Called once on each such thread; without the switch it has no effect.
+void MarkGpuLockPriorityThread();
 // The queue tag of the calling thread (0xffffffff when untagged), for reports that name the thread.
 std::uint32_t GpuLockThreadTag();
 // Lock sites (APS5_PROFILE_DRAW): a caller names the site of its next lock() so the [lock] line
