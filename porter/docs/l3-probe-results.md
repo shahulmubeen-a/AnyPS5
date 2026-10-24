@@ -133,8 +133,31 @@ counted (`[l3-sites]`, eboot VAs).
 ## Probe 5: markers on all seventeen (run l3p5)
 
 Hook table `PPSA26344-l3marks.hooks` as of commit 3963e96b3: the twelve confirmed functions get `l3-other`
-markers (the marker carries the function VA), the five unconfirmed ones are counted. Results: see the run
-summary appended below when the run finishes.
+markers (the marker carries the function VA), the five unconfirmed ones are counted. 22 hooks installed, no
+refusals, no unmatched exits, rendering unchanged (menu 5.8 fps, world 1.0 fps).
+
+**Foreign draws drop to 8% at the menu and 3.5% in the world:**
+
+| Phase | Draws / 10 s | Foreign direct | Foreign indirect | Remaining sites |
+|---|---|---|---|---|
+| Menu | 16,920 | 621 | 803 | `0x1267978` (in `0x1266b10`), `0x159b455` (in `0x159acb0`), `0x15782fd`, `0x1578c2f` |
+| World | 34,000 | 60-90 | 1,090-1,180 | the same four plus `0x13dc06d` (in `0x13dbec0`) and `0x126cefc` (in `0x126cb10`) |
+
+**Per-function behaviour** (`[l3-other]`, VA calls/draws):
+
+| Function | Menu | World | Shape |
+|---|---|---|---|
+| `0xdfb200` | 171 / 3,021 | 47 / 480 | one call, about 10-18 draws: a batch loop (shadow/depth cascades) |
+| `0x157a3a0` | 115 / 2,645 | 22 / 1,122 | one call, 23-51 draws: GPU-driven indirect batches |
+| `0x13dbac0` | 1,847 / 1,847 | 402 / 402 | exactly one draw per call |
+| `0xba7e70` | - | 11 / 363 | world only, about 33 draws per call |
+| `0xdf9e60` | - | 11 / 154 | world only, 14 per call |
+| `0x1579220` | 229 / 458 | 57 / 114 | two draws per call |
+| `0x13ac930`, `0x13db610`, `0x1257ee0` | 1 draw per call | 1 draw per call | |
+
+Together with DrawItem, DrawInstanced and DrawInstanced-b, **17 engine functions issue 92% of the menu's and
+96.5% of the world's draw packets.** The remainder are GPU-driven indirect draws from five more functions whose
+context argument is not yet confirmed.
 
 **Next.**
 1. Probe 6: for repeated engine draw calls on the same (technique, geometry, material), hash the PM4 dwords

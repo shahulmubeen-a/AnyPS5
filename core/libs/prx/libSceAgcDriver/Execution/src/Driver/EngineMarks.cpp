@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -68,6 +69,9 @@ struct StreamRecord {
     std::uint64_t hash = 0;
     std::vector<std::uint32_t> dwords;
     std::vector<std::uint32_t> packetOffsets;
+    // Probe 7: the register lists the stream's indirect-register packets point at (offset, value pairs) and the
+    // first 16 dwords behind the user-data pointer at SH 0x8c/0x8d, read when the packets are seen.
+    std::vector<std::uint32_t> contents;
 };
 
 struct StreamTotals {
@@ -79,6 +83,13 @@ struct StreamTotals {
     std::uint64_t dwordsDiffering = 0;
     std::map<std::uint32_t, std::pair<std::uint64_t, std::uint64_t>> packetsByOpcode;  // compared, differing
     std::map<std::uint32_t, std::uint64_t> differingRegisters;                           // register offset -> count
+    std::uint64_t contentDwords = 0;
+    std::uint64_t contentDiffering = 0;
+    std::uint64_t contentRepeatsSame = 0;
+    std::uint64_t contentRepeatsDiffer = 0;
+    std::uint64_t contentShapeDiffer = 0;
+    std::map<std::uint32_t, std::uint64_t> differingListRegisters;                       // register offset inside lists -> count
+    std::uint64_t userBlockDwordsDiffering = 0;
 };
 
 std::mutex streamMutex;
@@ -342,6 +353,15 @@ void Reporter() {
                     text += item;
                 }
                 text += " (" + std::to_string(regs.size()) + " registers, " + std::to_string(streams.size()) + " keys held)\n";
+                text += "[l3-contents] (10 s) register-list and user-block contents per key: repeats identical " + std::to_string(t.contentRepeatsSame) + ", differing " + std::to_string(t.contentRepeatsDiffer) + ", different size " + std::to_string(t.contentShapeDiffer) + "; dwords " + std::to_string(t.contentDwords) + ", differing " + std::to_string(t.contentDiffering) + " (user block " + std::to_string(t.userBlockDwordsDiffering) + "); differing list registers (offset count):";
+                std::vector<std::pair<std::uint64_t, std::uint32_t>> listRegs;
+                for (const auto& [reg, count] : t.differingListRegisters) listRegs.emplace_back(count, reg);
+                std::sort(listRegs.begin(), listRegs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (std::size_t index = 0; index < std::min<std::size_t>(listRegs.size(), 40); ++index) {
+                    std::snprintf(item, sizeof(item), " %x %llu;", listRegs[index].second, static_cast<unsigned long long>(listRegs[index].first));
+                    text += item;
+                }
+                text += " (" + std::to_string(listRegs.size()) + " registers)\n";
                 t = {};
             }
         }
@@ -375,6 +395,7 @@ struct WorkerState {
     std::tuple<std::uint64_t, std::uint64_t, std::uint64_t> key{};
     std::vector<std::uint32_t> stream;
     std::vector<std::uint32_t> packetOffsets;
+    std::vector<std::uint32_t> contents;
 };
 
 thread_local WorkerState worker;
@@ -413,6 +434,27 @@ void CompareStream() {
     record.hash = hash;
     record.dwords = worker.stream;
     record.packetOffsets = worker.packetOffsets;
+    t.contentDwords += worker.contents.size();
+    if (!record.contents.empty() || record.hash != hash) {
+        if (record.contents.size() != worker.contents.size()) {
+            ++t.contentShapeDiffer;
+        } else if (record.contents == worker.contents) {
+            ++t.contentRepeatsSame;
+        } else {
+            ++t.contentRepeatsDiffer;
+            for (std::size_t i = 0; i < worker.contents.size(); ++i) {
+                if (worker.contents[i] == record.contents[i]) continue;
+                ++t.contentDiffering;
+                // Pairs come as (offset, value); the user block is tagged with offset 0xffff0000.
+                if (i % 2 == 1) {
+                    const auto tag = worker.contents[i - 1];
+                    if (tag == 0xffff0000u) ++t.userBlockDwordsDiffering;
+                    else ++t.differingListRegisters[tag];
+                }
+            }
+        }
+    }
+    record.contents = worker.contents;
 }
 
 void Close(bool terminated) {
@@ -420,6 +462,7 @@ void Close(bool terminated) {
     if (terminated && (worker.open == Item || worker.open == Instanced) && !worker.stream.empty()) CompareStream();
     worker.stream.clear();
     worker.packetOffsets.clear();
+    worker.contents.clear();
     auto& row = worker.drawsInside == 0 ? totals.zeroDraw : worker.drawsInside == 1 ? totals.oneDraw : totals.manyDraws;
     ++row[worker.open];
     if (!terminated) ++totals.unterminated[worker.open];
@@ -474,6 +517,25 @@ void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t, std::uint32_
     if (worker.open == Item || worker.open == Instanced) {
         worker.packetOffsets.push_back(static_cast<std::uint32_t>(worker.stream.size()));
         worker.stream.insert(worker.stream.end(), packet.begin(), packet.end());
+        if ((opcode == 0x63 || opcode == 0x64 || opcode == 0x9f) && packet.size() == 5) {
+            const auto address = packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u);
+            const auto bytes = static_cast<std::size_t>(packet[4]) * (packet[3] == 0x80000000u ? 8u : 4u);
+            if (GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes)) {
+                const auto pairs = Pm4::ReadIndirectRegisters(packet);
+                worker.contents.insert(worker.contents.end(), pairs.begin(), pairs.end());
+            }
+        }
+        if (opcode == 0x76 && packet.size() >= 4 && (packet[1] & 0xffffu) == 0x8c) {
+            const auto pointer = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+            if (pointer != 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(pointer), 64)) {
+                std::uint32_t block[16];
+                std::memcpy(block, reinterpret_cast<const void*>(pointer), sizeof(block));
+                for (const auto dword : block) {
+                    worker.contents.push_back(0xffff0000u);
+                    worker.contents.push_back(dword);
+                }
+            }
+        }
     }
     if (!Pm4::DrawOpcode(opcode)) return;
     ++totals.draws;
