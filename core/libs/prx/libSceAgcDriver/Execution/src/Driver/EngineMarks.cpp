@@ -338,6 +338,33 @@ void MaterialHandler(GuestHookContext& context, const GuestHookInfo&, std::uint6
     Emit(context.rsi, Material, context.rdi, context.rdx, context.rcx, 0, hit);
 }
 
+// Engine Dispatch / DispatchIndirect(technique, ctx, ...): no marker (the context may be an ACB whose layout is not
+// checked); with APS5_ELEM_NAMES=1 the technique's names are scanned and, once per technique, the program
+// addresses (0x80'0000'0000-0x81'0000'0000) found in the first 0x100 bytes of its shader block (technique+0x10)
+// print as "[elem-tech] technique 0x<t> programs 0x<p>...", so dispatch programs can be named.
+void DispatchHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t) {
+    if (!namesEnabled) return;
+    const auto technique = context.rdi;
+    {
+        std::lock_guard lock(namesMutex);
+        if (namesSeen.contains(technique)) return;
+    }
+    ScanNames("ctechnique", technique);
+    if (technique < 0x10000 || !GuestMemory::Accessible(reinterpret_cast<const void*>(technique), 0x18)) return;
+    const auto shader = Load64(technique + 0x10);
+    if (shader < 0x10000 || (shader & 0xffff000000000000ull) != 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(shader), 0x100)) return;
+    std::string text;
+    char item[64];
+    for (std::uint32_t offset = 0; offset < 0x100; offset += 8) {
+        const auto value = Load64(shader + offset);
+        if (value >= 0x8000000000ull && value < 0x8100000000ull) {
+            std::snprintf(item, sizeof(item), " 0x%llx(+0x%x)", static_cast<unsigned long long>(value), offset);
+            text += item;
+        }
+    }
+    if (!text.empty()) std::fprintf(stderr, "[elem-tech] technique 0x%llx shader 0x%llx programs%s\n", static_cast<unsigned long long>(technique), static_cast<unsigned long long>(shader), text.c_str());
+}
+
 }
 
 // Called by L3ExitStub on the guest thread after the hooked function returned; returns the real return address.
@@ -511,6 +538,7 @@ const bool enabled = [] {
     RegisterGuestHookHandler_nid_no_patch("l3-instanced-b", &InstancedBHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-indirect", &IndirectHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-material", &MaterialHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-dispatch", &DispatchHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-other", &OtherHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-other-rdi", &OtherRdiHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-other-rdx", &OtherRdxHandler);

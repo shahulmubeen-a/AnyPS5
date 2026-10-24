@@ -22,7 +22,7 @@ param(
 # $Hooks names a guest hook table (APS5_GUEST_HOOKS). $ExtraEnv adds switches "NAME=value;NAME2=value2", $Unset
 # drops README switches "NAME;NAME2".
 # $Plan names a sweep plan: after $PlanStartAfter s in the world, each non-comment line
-#   <label> <seconds> [<control line>[|<control line>...]]
+#   <label> <seconds> [<control line>[;;<control line>...]]
 # is applied by writing its control lines into the live control file <Game>\elem-<Tag>.txt (APS5_ELEM_FILE), then
 # held for <seconds>; the presents counted over the step's second half and the newest frame dump are recorded in
 # runs-best\plan-<Tag>.txt and runs-best\shots-<Tag>\<label>.bmp. A label "base" with no control lines measures the
@@ -104,12 +104,43 @@ try {
         New-Item -ItemType Directory -Force $shots | Out-Null
         "# $(Get-Date -Format 'yyyy-MM-dd HH:mm') plan $Plan; label seconds presents-per-10s frames span-s dump" | Set-Content $out
         Start-Sleep -Seconds $PlanStartAfter
-        foreach ($line in (Get-Content $Plan | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })) {
-            $parts = $line.Trim() -split '\s+', 3
+        $queue = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in (Get-Content $Plan | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })) { $queue.Add($line.Trim()) }
+        for ($index = 0; $index -lt $queue.Count; ++$index) {
+            $line = $queue[$index]
+            # "@topmat <n> <seconds> [gmat|mat] [base-every]": the n materials with the most worker + commit time in the
+            # newest three [elem-mat] report rounds of this run, one step each, with a base step every [base-every].
+            if ($line.StartsWith('@topmat')) {
+                $words = $line -split '\s+'
+                $n = [int]$words[1]; $stepSeconds = [int]$words[2]
+                $verb = if ($words.Count -gt 3) { $words[3] } else { 'gmat' }
+                $every = if ($words.Count -gt 4) { [int]$words[4] } else { 4 }
+                $matLines = Select-String -Path (Join-Path $runs "run-$Tag.err.log") -Pattern '^\[elem-mat\] ' | ForEach-Object { $_.Line }
+                $rounds = $matLines | ForEach-Object { [int](($_ -split ' ')[1]) }
+                $newest = ($rounds | Measure-Object -Maximum).Maximum
+                $sums = @{}
+                foreach ($m in $matLines) {
+                    $f = $m -split ' '
+                    if ([int]$f[1] -lt $newest - 2) { continue }
+                    $sums[$f[7]] = [double]$sums[$f[7]] + [double]$f[2] + [double]$f[3]
+                }
+                $top = $sums.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $n
+                $insert = [System.Collections.Generic.List[string]]::new()
+                $count = 0
+                foreach ($entry in $top) {
+                    ++$count
+                    $insert.Add("mat$count-$($entry.Key) $stepSeconds $verb $($entry.Key)")
+                    if ($count % $every -eq 0) { $insert.Add("base-m$count $stepSeconds") }
+                }
+                Note "expanded @topmat into $($insert.Count) steps: $(($top | ForEach-Object { "$($_.Key)=$([math]::Round($_.Value))" }) -join ' ')"
+                $queue.InsertRange($index + 1, $insert)
+                continue
+            }
+            $parts = $line -split '\s+', 3
             $label = $parts[0]; $seconds = [int]$parts[1]
-            $lines = if ($parts.Count -gt 2) { $parts[2] -split '\|' | ForEach-Object { $_.Trim() } } else { @() }
+            $lines = if ($parts.Count -gt 2) { $parts[2] -split ';;' | ForEach-Object { $_.Trim() } } else { @() }
             ($lines -join "`n") | Set-Content -Encoding ascii $control
-            Note "step $label ($seconds s): $($lines -join ' | ')"
+            Note "step $label ($seconds s): $($lines -join ' ;; ')"
             Start-Sleep -Seconds ([int]($seconds / 2))
             $first = Row
             Start-Sleep -Seconds ($seconds - [int]($seconds / 2))
