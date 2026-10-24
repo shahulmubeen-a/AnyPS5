@@ -141,7 +141,43 @@ struct Rules {
     bool any = false;
     bool guest = false;
     int lockPriority = -1;
+    // gpoke <va> <u32>: a 4-byte value written into the game's data at an eboot VA while the rule is listed.
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> pokes;
 };
+
+// The original values of poked dwords, restored when their rule goes away.
+std::mutex pokeMutex;
+std::vector<std::pair<std::uint64_t, std::uint32_t>> pokedOriginals;
+
+void ApplyPokes(const Rules& next) {
+    std::lock_guard lock(pokeMutex);
+    for (auto it = pokedOriginals.begin(); it != pokedOriginals.end();) {
+        const bool kept = std::any_of(next.pokes.begin(), next.pokes.end(), [&](const auto& poke) { return poke.first == it->first; });
+        if (kept) {
+            ++it;
+            continue;
+        }
+        if (const auto host = EngineMarks::GuestAddress(it->first); host != 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(host), 4, true)) {
+            std::memcpy(reinterpret_cast<void*>(host), &it->second, 4);
+            std::fprintf(stderr, "[elem] gpoke 0x%llx restored to 0x%x\n", static_cast<unsigned long long>(it->first), it->second);
+        }
+        it = pokedOriginals.erase(it);
+    }
+    for (const auto& [va, value] : next.pokes) {
+        const auto host = EngineMarks::GuestAddress(va);
+        if (host == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(host), 4, true)) {
+            std::fprintf(stderr, "[elem] gpoke 0x%llx refused: not writable\n", static_cast<unsigned long long>(va));
+            continue;
+        }
+        if (std::none_of(pokedOriginals.begin(), pokedOriginals.end(), [&](const auto& original) { return original.first == va; })) {
+            std::uint32_t original = 0;
+            std::memcpy(&original, reinterpret_cast<const void*>(host), 4);
+            pokedOriginals.emplace_back(va, original);
+            std::fprintf(stderr, "[elem] gpoke 0x%llx 0x%x -> 0x%x\n", static_cast<unsigned long long>(va), original, value);
+        }
+        std::memcpy(reinterpret_cast<void*>(host), &value, 4);
+    }
+}
 
 std::atomic<const Rules*> rules{nullptr};
 
@@ -193,12 +229,18 @@ void Reload(const char* path) {
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
         else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
+        else if (verb == "gpoke") {
+            std::istringstream values(rest);
+            std::string va, value;
+            if (values >> va >> value) next->pokes.emplace_back(std::strtoull(va.c_str(), nullptr, 16), static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 16)));
+        }
         else --count;
     }
     next->any = count != 0;
     next->guest = !next->gkinds.empty() || !next->gvas.empty() || !next->gmaterials.empty();
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
     GuestMemory::SetGpuLockPriority(next->lockPriority);
+    ApplyPokes(*next);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
     std::fflush(stderr);
 }

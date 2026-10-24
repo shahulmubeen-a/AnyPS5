@@ -18,6 +18,8 @@ ENGINE = re.compile(r"^\[elem-engine\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\
 MAT = re.compile(r"^\[elem-mat\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (0x[0-9a-f]+) (.*)$")
 PROG = re.compile(r"^\[elem-prog\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (\S) (0x[0-9a-f]+) (0x[0-9a-f]+) (.*)$")
 PRESENT = re.compile(r"^\[present\] (\d+) presents over 10 s.*?GPU busy ([\d.]+) ms, idle gaps ([\d.]+) ms")
+PHASE = re.compile(r"^\[elem-ph\] (\d+) ([LP]) total=([\d.]+)((?: [^;=]+=[\d.]+;)*) (.*)$")
+PHASE_ITEM = re.compile(r" ([^;=]+)=([\d.]+);")
 KINDS = {1: "item", 2: "instanced", 3: "instanced-b", 10: "other"}
 
 
@@ -56,6 +58,7 @@ def main():
     progs = collections.defaultdict(lambda: [0.0] * 5)
     prog_label = {}
     presents = []
+    phases = {"L": collections.defaultdict(lambda: collections.defaultdict(float)), "P": collections.defaultdict(lambda: collections.defaultdict(float))}
     order = {}
     current = None
     for line in lines:
@@ -74,6 +77,12 @@ def main():
         if m := PRESENT.match(line):
             if current in chosen:
                 presents.append((int(m.group(1)), float(m.group(2)), float(m.group(3))))
+            continue
+        if m := PHASE.match(line):
+            if int(m.group(1)) in chosen:
+                name = m.group(5) if m.group(2) == "P" else fold(m.group(5), args.group_depth)
+                for item in PHASE_ITEM.finditer(m.group(4)):
+                    phases[m.group(2)][name][item.group(1)] += float(item.group(2))
             continue
         if m := PASS.match(line):
             if int(m.group(1)) not in chosen:
@@ -127,6 +136,20 @@ def main():
     print(f"\nprograms (avg per 10 s): worker commit prepare count skipped type first last label")
     for key, r in sorted(progs.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))[:args.top]:
         print(f"{per(r[0]):8.1f} {per(r[1]):8.1f} {per(r[2]):7.1f} {per(r[3]):7.0f} {per(r[4]):6.0f}  {key[0]} {key[1]} {key[2]} {prog_label.get(key, '')}")
+    if phases["P"]:
+        print()
+        print("program phases (avg ms per 10 s, top 5 phases):")
+        ranked = sorted(phases["P"].items(), key=lambda kv: -sum(kv[1].values()))[:args.top]
+        for key, d in ranked:
+            top = sorted(d.items(), key=lambda kv: -kv[1])[:5]
+            print(f"{sum(d.values()) / count:8.1f}  {key}: " + ", ".join(f"{p} {v / count:.1f}" for p, v in top))
+    if phases["L"]:
+        print()
+        print("label phases (avg ms per 10 s, top 5 phases):")
+        ranked = sorted(phases["L"].items(), key=lambda kv: -sum(kv[1].values()))[:args.top]
+        for key, d in ranked:
+            top = sorted(d.items(), key=lambda kv: -kv[1])[:5]
+            print(f"{sum(d.values()) / count:8.1f}  {key}: " + ", ".join(f"{p} {v / count:.1f}" for p, v in top))
     if args.json:
         out = {
             "rounds": sorted(chosen),
@@ -134,6 +157,8 @@ def main():
             "queues": {q: [w / count, c / count] for q, (w, c) in queues.items()},
             "passes": {k: [v / count for v in r] for k, r in passes.items()},
             "order": order,
+            "label_phases": {k: {p: v / count for p, v in d.items()} for k, d in phases["L"].items()},
+            "program_phases": {k: {p: v / count for p, v in d.items()} for k, d in phases["P"].items()},
             "engines": {k: [v / count for v in r] for k, r in engines.items()},
             "materials": {k: [v / count for v in r] + [mat_label.get(k, "")] for k, r in mats.items()},
             "programs": {" ".join(k): [v / count for v in r] + [prog_label.get(k, "")] for k, r in progs.items()},

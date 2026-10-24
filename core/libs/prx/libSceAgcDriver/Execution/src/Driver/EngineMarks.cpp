@@ -661,6 +661,16 @@ std::uint64_t CurrentMaterial() {
     return enabled ? worker.material : 0;
 }
 
+std::uintptr_t GuestAddress(std::uint64_t va) {
+#ifdef _WIN32
+    const auto elf0 = Elf0();
+    return elf0 != 0 ? elf0 + static_cast<std::uintptr_t>(va) : 0;
+#else
+    static_cast<void>(va);
+    return 0;
+#endif
+}
+
 bool IsMarker(std::span<const std::uint32_t> packet) {
     return packet.size() == MarkerDwords && ((packet[0] >> 8u) & 0xffu) == 0x10u && ((packet[0] >> 2u) & 0x3fu) == 0 && (packet[1] & 0xffff0000u) == MarkerMagic && (packet[1] & 0xffffu) > 0 && (packet[1] & 0xffffu) < KindCount;
 }

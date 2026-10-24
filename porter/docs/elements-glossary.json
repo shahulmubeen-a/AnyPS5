@@ -1,0 +1,15 @@
+{
+ "glossary": [
+  {"term": "Frame", "text": "One picture. The game builds every frame from scratch: about 3,000 draws and 2,000 compute jobs each time. Frames per second (fps) is how many it finishes each second."},
+  {"term": "Pass", "text": "One stage of building the frame, such as shadows, the main scene, lighting or post effects. The game names its passes with debug markers, and those names are used here."},
+  {"term": "Draw", "text": "One order to the graphics card: draw this shape with this material. A tree is a few draws, a field of grass is one draw repeated many times."},
+  {"term": "Compute job (dispatch)", "text": "An order to the graphics card that calculates instead of drawing: culling, lighting tiles, particles, blur. Its results feed later draws."},
+  {"term": "Material", "text": "What a surface is made of: its textures and shader settings (bark, steel, cloth, snow)."},
+  {"term": "Engine draw function", "text": "A function inside the game's own code that issues draws, for example DrawItem for single objects or DrawInstanced for repeated ones. Found by reverse engineering the game binary."},
+  {"term": "Queue worker", "text": "The emulator thread that reads the game's GPU orders one by one and translates each into PC graphics work. Queue 0 is the main graphics queue; the others are async compute queues."},
+  {"term": "Draw committer", "text": "A second emulator thread that records the translated draws into Vulkan (the PC graphics interface). When a later order needs the result of earlier draws, the queue worker has to wait for it: a drain."},
+  {"term": "Lock wait", "text": "Time a thread waits for the shared GPU lock while another thread holds it."},
+  {"term": "Skip", "text": "For these measurements the emulator drops the orders of one element on purpose. The game does not know; the picture just misses that element."},
+  {"term": "Cascades", "text": "The sun's shadow map is split into several rings around the camera, from fine near the player to coarse far away. Each ring draws the scene again."}
+ ]
+}

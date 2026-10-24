@@ -39,6 +39,8 @@ OpenKind CurrentKind();
 std::uint64_t CurrentMaterial();
 // Whether a NOP packet is one of our markers (validation accepts sub-op 0 NOPs).
 bool IsMarker(std::span<const std::uint32_t> packet);
+// The host address of an eboot VA in app.exe (0 when the image has no .elf0 section or off Windows).
+std::uintptr_t GuestAddress(std::uint64_t va);
 
 }
 
