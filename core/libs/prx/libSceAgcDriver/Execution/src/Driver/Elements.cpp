@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <algorithm>
@@ -143,7 +144,37 @@ struct Rules {
     int lockPriority = -1;
     // gpoke <va> <u32>: a 4-byte value written into the game's data at an eboot VA while the rule is listed.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> pokes;
+    // switch <APS5_NAME> on|off: a runtime switch of the in-run A/B registry set live while listed.
+    std::vector<std::pair<std::string, bool>> switches;
 };
+
+// The environment values of switches a rule changed, restored when their rule goes away.
+std::vector<std::pair<std::string, bool>> switchOriginals;
+std::mutex switchMutex;
+
+void ApplySwitches(const Rules& next) {
+    std::lock_guard lock(switchMutex);
+    for (auto it = switchOriginals.begin(); it != switchOriginals.end();) {
+        const bool kept = std::any_of(next.switches.begin(), next.switches.end(), [&](const auto& item) { return item.first == it->first; });
+        if (kept) {
+            ++it;
+            continue;
+        }
+        if (const auto id = Graphics::RuntimeSwitches::Find(it->first)) Graphics::RuntimeSwitches::Assign(*id, it->second);
+        std::fprintf(stderr, "[elem] switch %s restored to %s\n", it->first.c_str(), it->second ? "on" : "off");
+        it = switchOriginals.erase(it);
+    }
+    for (const auto& [name, value] : next.switches) {
+        const auto id = Graphics::RuntimeSwitches::Find(name);
+        if (!id) {
+            std::fprintf(stderr, "[elem] switch %s is not a runtime switch\n", name.c_str());
+            continue;
+        }
+        if (std::none_of(switchOriginals.begin(), switchOriginals.end(), [&](const auto& original) { return original.first == name; })) switchOriginals.emplace_back(name, Graphics::RuntimeSwitches::Set(*id));
+        Graphics::RuntimeSwitches::Assign(*id, value);
+        std::fprintf(stderr, "[elem] switch %s %s\n", name.c_str(), value ? "on" : "off");
+    }
+}
 
 // The original values of poked dwords, restored when their rule goes away.
 std::mutex pokeMutex;
@@ -229,6 +260,11 @@ void Reload(const char* path) {
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
         else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
+        else if (verb == "switch") {
+            std::istringstream values(rest);
+            std::string name, value;
+            if (values >> name >> value) next->switches.emplace_back(name, value == "on");
+        }
         else if (verb == "gpoke") {
             std::istringstream values(rest);
             std::string va, value;
@@ -241,6 +277,7 @@ void Reload(const char* path) {
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
     GuestMemory::SetGpuLockPriority(next->lockPriority);
     ApplyPokes(*next);
+    ApplySwitches(*next);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
     std::fflush(stderr);
 }
