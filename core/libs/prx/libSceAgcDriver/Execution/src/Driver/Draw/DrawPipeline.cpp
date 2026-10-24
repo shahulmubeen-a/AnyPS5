@@ -334,6 +334,7 @@ void DrawPipeline::prepareLoop() {
     PerformanceTrace::BindThread("draw preparer");
     for (;;) {
         Prepare job;
+        Elements::Tag element;
         {
             std::unique_lock lock(mutex);
             preparerWaiting = true;
@@ -342,6 +343,7 @@ void DrawPipeline::prepareLoop() {
             auto* item = nextPrepare();
             item->prepareTaken = true;
             job = item->prepare;
+            element = item->element;
         }
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -349,7 +351,9 @@ void DrawPipeline::prepareLoop() {
         } catch (...) {
         }
         preparedItems.fetch_add(1, std::memory_order_relaxed);
-        prepareNs.fetch_add(elapsedNs(start), std::memory_order_relaxed);
+        const auto spentNs = elapsedNs(start);
+        prepareNs.fetch_add(spentNs, std::memory_order_relaxed);
+        Elements::NoteCommit(element, spentNs, true);
     }
 }
 
@@ -425,6 +429,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     const bool prepared = static_cast<bool>(prepare);
     items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), nowNs(), std::move(prepare)});
     items.back().draw = draw;
+    items.back().element = Elements::CurrentTag();
     addWrites(items.back().writes);
     for (const auto& [begin, limit] : items.back().reads) {
         items.back().readBounds.first = std::min(items.back().readBounds.first, begin);
@@ -531,6 +536,7 @@ void DrawPipeline::run() {
     for (;;) {
         Commit* commit = nullptr;
         bool isDraw = false;
+        Elements::Tag element;
         SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
         {
             std::unique_lock lock(mutex);
@@ -547,6 +553,7 @@ void DrawPipeline::run() {
                 committerWakeNs += static_cast<std::uint64_t>(std::max<std::int64_t>(0, begun - items.front().pushedNs));
             }
             isDraw = items.front().draw;
+            element = items.front().element;
         }
         const auto start = std::chrono::steady_clock::now();
         std::exception_ptr fatal;
@@ -567,6 +574,7 @@ void DrawPipeline::run() {
             fatal = std::current_exception();
         }
         const auto spent = elapsedNs(start);
+        Elements::NoteCommit(element, static_cast<std::uint64_t>(spent), false);
         traceWait("DrawPipeline", "commit", start);
         if (fatal != nullptr && !stopped) {
             stopped = true;

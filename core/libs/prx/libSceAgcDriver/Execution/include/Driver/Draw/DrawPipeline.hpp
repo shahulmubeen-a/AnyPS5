@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_DRAW_DRAWPIPELINE_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_DRAW_DRAWPIPELINE_HPP
 
+#include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -113,6 +114,8 @@ private:
         // The span of `reads` (HeldReads skips an item it misses; APS5_NO_HELD_READ_BOUNDS=1 scans every range).
         Range readBounds{~std::uint64_t{0}, 0};
         bool draw = false;
+        // Porter element costs: the element of the packet that enqueued the item.
+        Elements::Tag element;
     };
     DrawPipeline() = default;
     template<typename TRanges, typename TBounds>

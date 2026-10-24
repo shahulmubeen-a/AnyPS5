@@ -3,6 +3,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include <algorithm>
+#include <atomic>
 #include <thread>
 #include <chrono>
 #include <cstdio>
@@ -15,6 +16,16 @@
 extern "C" void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protection, int flags, int descriptor, std::int64_t offset) noexcept;
 
 namespace AgcDriver::Pm4 {
+
+namespace {
+
+// QueueState::markerGeneration values: unique across queues, so a cache keyed by it never confuses two stacks.
+std::uint64_t NextMarkerGeneration() {
+    static std::atomic<std::uint64_t> generation{0};
+    return generation.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+}
 
 std::uint64_t GdsAddress() {
     static const std::uint64_t address = [] {
@@ -1022,10 +1033,11 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x10:
             switch ((packet[0] >> 2u) & 0x3fu) {
                 case 0: return;
-                case 0x09: queue = std::move(*std::make_unique<QueueState>()); return;
-                case 0x0b: queue.markers.emplace_back(reinterpret_cast<const char*>(packet.data() + 1)); return;
+                case 0x09: queue = std::move(*std::make_unique<QueueState>()); queue.markerGeneration = NextMarkerGeneration(); return;
+                case 0x0b: queue.markers.emplace_back(reinterpret_cast<const char*>(packet.data() + 1)); queue.markerGeneration = NextMarkerGeneration(); return;
                 case 0x0c:
                     if (!queue.markers.empty()) queue.markers.pop_back();
+                    queue.markerGeneration = NextMarkerGeneration();
                     return;
                 case 0x1a:
                     if (TraceContextState()) std::fprintf(stderr, "[context] op %u: %zu registers, saved %d, cb0 %x info %x mask %x\n", packet[1], queue.context.size(), queue.savedContext.has_value() ? 1 : 0, queue.context.contains(0x318) ? queue.context.at(0x318) : 0u, queue.context.contains(0x31c) ? queue.context.at(0x31c) : 0u, queue.context.contains(0x8e) ? queue.context.at(0x8e) : 0u);

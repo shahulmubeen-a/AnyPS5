@@ -29,6 +29,14 @@ bool Enabled();
 void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t header, std::uint32_t opcode, std::span<const std::uint32_t> packet);
 // Called by Driver::draw with the draw's first and last program code addresses, on the queue worker.
 void NoteDrawPrograms(std::uint64_t first, std::uint64_t last);
+// For porter element costs: the kind of the engine call open on the calling queue worker (0 when none; for Other
+// the hooked function's eboot VA) and the material of the newest BindMaterial / DrawItem marker of the submission.
+struct OpenKind {
+    std::uint32_t kind = 0;
+    std::uint64_t va = 0;
+};
+OpenKind CurrentKind();
+std::uint64_t CurrentMaterial();
 // Whether a NOP packet is one of our markers (validation accepts sub-op 0 NOPs).
 bool IsMarker(std::span<const std::uint32_t> packet);
 

@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
@@ -435,6 +436,15 @@ void Driver::execute(const Submission& submission) {
         const auto opcode = (header >> 8u) & 0xffu;
         auto nextCursor = cursor + count;
         if (EngineMarks::Enabled()) EngineMarks::Note(submission.queue, submission.serial, header, opcode, packet);
+        // Porter element costs (APS5_ELEM / APS5_ELEM_FILE): times this iteration and may skip a draw or dispatch
+        // that a live skip rule names, before any drain, flush or memory preparation.
+        Elements::PacketScope elementScope;
+        if (Elements::Enabled() && header != FlipPacketHeader && elementScope.Begin(submission.queue, queue, opcode, Pm4::DrawOpcode(opcode))) {
+            recent.Record(cursor);
+            cursor = nextCursor;
+            if (ahead != nullptr) ahead->Skip(aheadSegment, cursor);
+            continue;
+        }
         if (dispatchGapsEnabled()) noteDispatchGap(submission.queue, submission.serial, opcode, packet);
         if (ringOverlap) noteRingPacket(submission.queue, submission.serial, opcode, header);
         const bool predicated = Pm4::Predicated(header) && queue.predication.operation != 0;

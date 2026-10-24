@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawProgramTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DrawWriteRanges.hpp"
@@ -345,6 +346,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     for (const auto& patch : userPatches) programs[patch.program].userData[patch.index] = patch.value;
     auto& writablePrograms = programs;
     if (!programs.empty() && EngineMarks::Enabled()) EngineMarks::NoteDrawPrograms(programs.front().binary.codeAddress, programs.back().binary.codeAddress);
+    if (!programs.empty() && Elements::Enabled()) {
+        Elements::NoteDrawPrograms(programs.front().binary.codeAddress, programs.back().binary.codeAddress);
+        if (Elements::SkipDrawPrograms(programs.front().binary.codeAddress, programs.back().binary.codeAddress)) return drawn();
+    }
     if (const auto skipped = SkippedShader(); skipped != 0 && std::any_of(programs.begin(), programs.end(), [skipped](const DrawProgram& program) { return program.binary.codeAddress == skipped; })) return drawn();
     const bool emptyIndirectSkip = EmptyIndirectSkip();
     auto& cpuIndirectPrograms = CpuIndirectPrograms();

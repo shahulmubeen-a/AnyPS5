@@ -276,6 +276,9 @@ struct QueueState {
     std::uint32_t indexType = 0;
     std::uint32_t instanceCount = 1;
     std::vector<std::string> markers;
+    // Bumped (from a process-wide counter) whenever `markers` changes, so per-packet consumers can cache what they
+    // derived from the stack (porter element costs, APS5_ELEM_*).
+    std::uint64_t markerGeneration = 0;
     Predication predication;
 
     void ClearContext() {
