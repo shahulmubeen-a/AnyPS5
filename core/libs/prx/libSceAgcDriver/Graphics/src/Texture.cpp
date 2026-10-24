@@ -133,6 +133,20 @@ std::atomic<std::uint64_t> partialUploads{0}, partialUploadBytes{0}, partialWrit
 std::atomic<std::uint64_t> pretestSkipped{0}, unregisteredDropped{0}, keyFlipKept{0};
 // Storage refreshes whose flush recorded its write-backs behind the pending writer (APS5_DEFER_REFRESH_FLUSH).
 std::atomic<std::uint64_t> deferredRefreshFlushes{0};
+// Porter (element rules "deferstores on"): more FlushPending reasons record their write-backs behind the pending
+// writer on the GPU instead of waiting for it on the CPU, under the same all-imported condition as the refresh
+// deferral. The label/interrupt read-backs stay ordered because the label itself is written on the GPU after them.
+std::atomic<bool> porterDeferStores{false};
+std::atomic<std::uint64_t> porterDeferredStores{0};
+
+bool PorterDeferReason(const char* reason) {
+    if (reason == nullptr || !porterDeferStores.load(std::memory_order_relaxed)) return false;
+    static constexpr const char* reasons[] = {"readback before label", "readback before interrupt", "depth plane store", "storage image creation", "imported buffer region", "written buffer range"};
+    for (const char* candidate : reasons) {
+        if (std::strcmp(reason, candidate) == 0) return true;
+    }
+    return false;
+}
 std::atomic<std::uint64_t> deferredFlipStores{0};
 std::atomic<std::uint64_t> queuedReadHeld{0}, heldReadSkips{0};
 // Images stored by a FlushPending after a hook skip of theirs (AccessKeptByCpu), of which by the
@@ -4374,9 +4388,10 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     const bool flipStore = reason != nullptr && std::strcmp(reason, "flip") == 0;
     const bool deferFlip = flipStore && (deferImported || RuntimeSwitches::Set(RuntimeSwitch::DeferFlipStore));
     bool deferWriter = false;
-    if ((deferFlip || (deferRefresh && reason != nullptr && std::strcmp(reason, "storage refresh") == 0)) && Recorder::Active() != nullptr && !Recorder::InCompletion()) {
+    const bool porterDefer = PorterDeferReason(reason);
+    if ((deferFlip || porterDefer || (deferRefresh && reason != nullptr && std::strcmp(reason, "storage refresh") == 0)) && Recorder::Active() != nullptr && !Recorder::InCompletion()) {
         deferWriter = std::all_of(flush.begin(), flush.end(), [deferImported](const std::shared_ptr<StorageTexture>& texture) { return (texture->blockUnits || deferImported) && HostImportFor(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) != nullptr; });
-        if (deferWriter) (flipStore ? deferredFlipStores : deferredRefreshFlushes).fetch_add(1, std::memory_order_relaxed);
+        if (deferWriter) (porterDefer ? porterDeferredStores : flipStore ? deferredFlipStores : deferredRefreshFlushes).fetch_add(1, std::memory_order_relaxed);
     }
     if (auto* recorder = Recorder::Active(); !deferWriter && recorder != nullptr && !Recorder::InCompletion()) {
         try {
@@ -4705,6 +4720,14 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
         if (FlushPending(address, bytes, nullptr, reason)) ++stored;
     }
     return stored;
+}
+
+void StorageTexture::SetPorterDeferStores(bool on) {
+    porterDeferStores.store(on, std::memory_order_relaxed);
+}
+
+std::uint64_t StorageTexture::TakePorterDeferredStores() {
+    return porterDeferredStores.exchange(0, std::memory_order_relaxed);
 }
 
 void StorageTexture::StoreReadbackBeforeLabel(const char* reason) {

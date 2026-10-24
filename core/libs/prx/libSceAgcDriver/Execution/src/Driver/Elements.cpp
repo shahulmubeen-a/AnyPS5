@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <algorithm>
@@ -147,6 +148,7 @@ struct Rules {
     bool guest = false;
     int lockPriority = -1;
     std::size_t pipeDepth = 0;
+    bool deferStores = false;
     std::size_t prepareAhead = 0;
     // gpoke <va> <u32>: a 4-byte value written into the game's data at an eboot VA while the rule is listed.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> pokes;
@@ -272,6 +274,7 @@ void Reload(const char* path) {
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
         else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
+        else if (verb == "deferstores") next->deferStores = rest == "on";
         else if (verb == "pipedepth") next->pipeDepth = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "prepahead") next->prepareAhead = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "switch") {
@@ -291,6 +294,7 @@ void Reload(const char* path) {
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
     GuestMemory::SetGpuLockPriority(next->lockPriority);
     DriverDetail::DrawPipeline::OverrideDepth(next->pipeDepth, next->prepareAhead);
+    Graphics::StorageTexture::SetPorterDeferStores(next->deferStores);
     ApplyPokes(*next);
     ApplySwitches(*next);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
@@ -641,7 +645,7 @@ void Report() {
             sums.first += delta.ns;
             sums.second += delta.commitNs;
         }
-        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size());
+        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; %llu deferred stores; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size(), static_cast<unsigned long long>(Graphics::StorageTexture::TakePorterDeferredStores()));
         text += line;
         for (const auto& [queue, sums] : queues) {
             std::snprintf(line, sizeof(line), " q%llx %.0f/%.0f;", static_cast<unsigned long long>(queue == 0 ? 0 : queue - 1), Ms(sums.first), Ms(sums.second));
