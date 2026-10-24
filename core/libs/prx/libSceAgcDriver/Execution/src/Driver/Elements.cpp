@@ -109,7 +109,7 @@ std::string LabelText(std::uint32_t slot) {
 
 struct Rules {
     std::uint64_t generation = 0;
-    std::vector<std::string> passes, passDraws, passDispatches;
+    std::vector<std::string> passes, passDraws, passDispatches, passExact;
     std::vector<std::uint64_t> programs, vas, materials, gvas, gmaterials;
     std::vector<std::uint32_t> kinds, gkinds, queues;
     bool any = false;
@@ -156,6 +156,7 @@ void Reload(const char* path) {
         if (verb == "pass") next->passes.push_back(rest);
         else if (verb == "passd") next->passDraws.push_back(rest);
         else if (verb == "passc") next->passDispatches.push_back(rest);
+        else if (verb == "passx") next->passExact.push_back(rest);
         else if (verb == "prog") next->programs.push_back(hex);
         else if (verb == "kind") next->kinds.push_back(KindNumber(rest));
         else if (verb == "va") next->vas.push_back(hex);
@@ -240,6 +241,7 @@ std::uint32_t LabelSkipMask(std::uint32_t slot, const Rules& active) {
     if (LabelMatches(active.passes, text)) mask |= 3u;
     if (LabelMatches(active.passDraws, text)) mask |= 1u;
     if (LabelMatches(active.passDispatches, text)) mask |= 2u;
+    if (Contains(active.passExact, text)) mask |= 3u;
     entry->skipMask.store(mask, std::memory_order_relaxed);
     entry->skipGeneration.store(active.generation, std::memory_order_release);
     return mask;

@@ -15,7 +15,7 @@
 // time is charged too. "[elem-*]" lines report the top elements every 10 s.
 // APS5_ELEM_FILE is re-read (by modification time, at most every 0.5 s) for skip rules, one per line:
 //   pass <text>   skip draws and dispatches whose pass label contains <text> (label: "q<queue>|m1/m2/...")
-//   passd <text>  only draws; passc <text> only dispatches
+//   passd <text>  only draws; passc <text> only dispatches; passx <label> only the label itself (exact)
 //   prog <hex>    skip draws (first or last program) and dispatches (program) with this program address
 //   kind <name>   skip draws inside engine calls of this kind (item, instanced, instanced-b, other)
 //   va <hex>      skip draws inside the engine function with this eboot VA (l3-other hooks)
