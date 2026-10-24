@@ -46,7 +46,20 @@ struct Totals {
 
 Totals totals;
 
-const char* const KindNames[KindCount] = {"?", "item", "instanced", "instanced-b", "material", "item-end", "instanced-end", "instanced-b-end", "indirect", "indirect-end"};
+const char* const KindNames[KindCount] = {"?", "item", "instanced", "instanced-b", "material", "item-end", "instanced-end", "instanced-b-end", "indirect", "indirect-end", "other", "other-end"};
+
+bool EndKind(Kind kind) {
+    return kind == ItemEnd || kind == InstancedEnd || kind == InstancedBEnd || kind == IndirectEnd || kind == OtherEnd;
+}
+
+struct OtherStats {
+    std::uint64_t calls = 0;
+    std::uint64_t draws = 0;
+    std::uint64_t oneDraw = 0;
+};
+
+std::mutex otherMutex;
+std::map<std::uint64_t, OtherStats> otherStats;
 
 std::mutex foreignMutex;
 std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> foreignPrograms;
@@ -143,6 +156,11 @@ void IndirectHandler(GuestHookContext& context, const GuestHookInfo&, std::uint6
     Enter(context, Indirect, IndirectEnd, context.rdx, context.rcx, context.r8, hit);
 }
 
+// Any other engine draw function whose second argument is the context (checked in the decompiled body).
+void OtherHandler(GuestHookContext& context, const GuestHookInfo& info, std::uint64_t hit) {
+    Enter(context, Other, OtherEnd, info.va, context.rdx, context.rcx, hit);
+}
+
 // BindMaterial(technique, ctx, material, binding record): begin marker only.
 void MaterialHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
     Emit(context.rsi, Material, context.rdi, context.rdx, context.rcx, 0, hit);
@@ -191,7 +209,7 @@ namespace {
 std::string Row(const char* name, const Counters& counters, std::array<std::uint64_t, KindCount>& last, bool endsToo) {
     std::string text = std::string(" ") + name;
     for (std::uint32_t kind = 1; kind < KindCount; ++kind) {
-        if (!endsToo && (kind == ItemEnd || kind == InstancedEnd || kind == InstancedBEnd || kind == IndirectEnd)) continue;
+        if (!endsToo && EndKind(static_cast<Kind>(kind))) continue;
         const auto value = counters[kind].load(std::memory_order_relaxed);
         text += " " + std::string(KindNames[kind]) + "=" + std::to_string(value - last[kind]);
         last[kind] = value;
@@ -255,6 +273,22 @@ void Reporter() {
             }
             text += " (" + std::to_string(sites.size()) + " sites; inside engine calls " + std::to_string(engineSiteDraws.exchange(0)) + ")\n";
         }
+        std::vector<std::pair<std::uint64_t, OtherStats>> others;
+        {
+            std::lock_guard lock(otherMutex);
+            for (const auto& [va, stats] : otherStats) others.emplace_back(va, stats);
+            otherStats.clear();
+        }
+        if (!others.empty()) {
+            std::sort(others.begin(), others.end(), [](const auto& a, const auto& b) { return a.second.draws > b.second.draws; });
+            text += "[l3-other] (10 s) other hooked engine functions, VA calls/draws/calls-with-1-draw:";
+            char item[96];
+            for (const auto& [va, stats] : others) {
+                std::snprintf(item, sizeof(item), " 0x%llx %llu/%llu/%llu;", static_cast<unsigned long long>(va), static_cast<unsigned long long>(stats.calls), static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.oneDraw));
+                text += item;
+            }
+            text += "\n";
+        }
         std::fputs(text.c_str(), stderr);
         std::fflush(stderr);
     }
@@ -268,6 +302,7 @@ const bool enabled = [] {
     RegisterGuestHookHandler_nid_no_patch("l3-instanced-b", &InstancedBHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-indirect", &IndirectHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-material", &MaterialHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-other", &OtherHandler);
 #endif
     std::thread(Reporter).detach();
     return true;
@@ -278,6 +313,7 @@ struct WorkerState {
     std::uint32_t queue = 0xffffffffu;
     std::uint64_t serial = 0;
     Kind open = Kind(0);
+    std::uint64_t openVa = 0;
     std::uint64_t drawsInside = 0;
     bool lastDrawForeign = false;
 };
@@ -289,7 +325,15 @@ void Close(bool terminated) {
     auto& row = worker.drawsInside == 0 ? totals.zeroDraw : worker.drawsInside == 1 ? totals.oneDraw : totals.manyDraws;
     ++row[worker.open];
     if (!terminated) ++totals.unterminated[worker.open];
+    if (worker.open == Other) {
+        std::lock_guard lock(otherMutex);
+        auto& stats = otherStats[worker.openVa];
+        ++stats.calls;
+        stats.draws += worker.drawsInside;
+        if (worker.drawsInside == 1) ++stats.oneDraw;
+    }
     worker.open = Kind(0);
+    worker.openVa = 0;
     worker.drawsInside = 0;
 }
 
@@ -314,12 +358,13 @@ void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t, std::uint32_
         const auto kind = static_cast<Kind>(packet[1] & 0xffffu);
         ++totals.seen[kind];
         if (kind == Material) return;
-        if (kind == ItemEnd || kind == InstancedEnd || kind == InstancedBEnd || kind == IndirectEnd) {
+        if (EndKind(kind)) {
             Close(true);
             return;
         }
         Close(false);
         worker.open = kind;
+        if (kind == Other) std::memcpy(&worker.openVa, &packet[4], sizeof(worker.openVa));
         return;
     }
     if (!Pm4::DrawOpcode(opcode)) return;

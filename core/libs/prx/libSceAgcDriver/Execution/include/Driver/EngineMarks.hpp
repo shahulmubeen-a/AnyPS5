@@ -20,7 +20,9 @@ namespace AgcDriver::EngineMarks {
 constexpr std::uint32_t MarkerMagic = 0x4c330000u;
 constexpr std::uint32_t MarkerDwords = 11;
 
-enum Kind : std::uint32_t { Item = 1, Instanced = 2, InstancedB = 3, Material = 4, ItemEnd = 5, InstancedEnd = 6, InstancedBEnd = 7, Indirect = 8, IndirectEnd = 9, KindCount = 10 };
+// Other/OtherEnd: any further engine draw function hooked with the "l3-other" handler; the marker's second
+// value carries the function's eboot VA, and the report lists calls and draws per VA.
+enum Kind : std::uint32_t { Item = 1, Instanced = 2, InstancedB = 3, Material = 4, ItemEnd = 5, InstancedEnd = 6, InstancedBEnd = 7, Indirect = 8, IndirectEnd = 9, Other = 10, OtherEnd = 11, KindCount = 12 };
 
 bool Enabled();
 // Called by the queue worker for every packet; cheap when disabled.
