@@ -108,6 +108,23 @@ try {
         foreach ($line in (Get-Content $Plan | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })) { $queue.Add($line.Trim()) }
         for ($index = 0; $index -lt $queue.Count; ++$index) {
             $line = $queue[$index]
+            # "@autoplan <rounds> [elem_plan.py options]": summarizes the newest <rounds> element report rounds of this
+            # run (elem_report.py) and inserts the sweep elem_plan.py builds from them.
+            if ($line.StartsWith('@autoplan')) {
+                $words = $line -split '\s+'
+                $rounds = $words[1]
+                $options = if ($words.Count -gt 2) { $words[2..($words.Count - 1)] } else { @() }
+                $porterTools = 'C:\Users\Mubeen\Documents\Projects\ps5-porter\porter\tools'
+                $json = Join-Path $runs "report-$Tag.json"
+                $auto = Join-Path $runs "autoplan-$Tag.txt"
+                & python -I (Join-Path $porterTools 'elem_report.py') (Join-Path $runs "run-$Tag.err.log") --last $rounds --json $json --top 60 | Set-Content (Join-Path $runs "report-$Tag.txt")
+                & python -I (Join-Path $porterTools 'elem_plan.py') $json $auto @options | Out-Null
+                $insert = [System.Collections.Generic.List[string]]::new()
+                foreach ($generated in (Get-Content $auto | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })) { $insert.Add($generated.Trim()) }
+                Note "expanded @autoplan into $($insert.Count) steps from the newest $rounds rounds"
+                $queue.InsertRange($index + 1, $insert)
+                continue
+            }
             # "@topmat <n> <seconds> [gmat|mat] [base-every]": the n materials with the most worker + commit time in the
             # newest three [elem-mat] report rounds of this run, one step each, with a base step every [base-every].
             if ($line.StartsWith('@topmat')) {

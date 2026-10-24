@@ -1,0 +1,3 @@
+# el2 (2026-10-25): measure the world scene, then sweep the costliest elements found in the measurement.
+measure 240
+@autoplan 18 --passes 16 --depth 2 --programs 8 --materials 8 --seconds 40 --base-every 4
