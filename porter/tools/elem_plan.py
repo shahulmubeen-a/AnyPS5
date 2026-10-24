@@ -41,15 +41,24 @@ def main():
     ap.add_argument("--extra")
     args = ap.parse_args()
     report = json.load(open(args.report, encoding="utf-8"))
+    # Cost of a group = worker time outside WAIT_REG_MEM + committer + preparer time; groups that issue no draws or
+    # dispatches (pure waits) are left out, skipping them would change nothing.
     groups = collections.defaultdict(float)
+    work = collections.defaultdict(float)
     for label, row in report["passes"].items():
-        groups[fold(label, args.depth)] += row[0] + row[1] + row[2]
+        key = fold(label, args.depth)
+        groups[key] += max(0.0, row[0] - row[3]) + row[1] + row[2]
+        work[key] += row[4] + row[5]
+    groups = {k: v for k, v in groups.items() if work[k] > 0}
     steps = []
     for label, ms in sorted(groups.items(), key=lambda kv: -kv[1])[:args.passes]:
         if ms < args.min_ms:
             break
-        # A group without marker levels (the bare queue, "q0|") is skipped by its exact label only.
-        steps.append((f"pass-{slug(label)}", f"pass {label}" if not label.endswith("|") else f"passx {label}"))
+        # A group is the label itself plus, when it sits at the fold depth, every label below it ("<label>/...").
+        # Plain prefix rules would also catch siblings such as "Deferred wetness" for "Deferred".
+        depth = len(label.partition("|")[2].split("/")) if label.partition("|")[2] else 0
+        rule = f"passx {label}" if depth < args.depth else f"passx {label};;pass {label}/"
+        steps.append((f"pass-{slug(label)}", rule))
     for kind in ("item", "instanced", "instanced-b"):
         steps.append((f"kind-{kind}", f"kind {kind}"))
     others = sorted(((k, v) for k, v in report["engines"].items() if k.startswith("other ")), key=lambda kv: -(kv[1][0] + kv[1][1]))[:6]
