@@ -159,7 +159,51 @@ Together with DrawItem, DrawInstanced and DrawInstanced-b, **17 engine functions
 96.5% of the world's draw packets.** The remainder are GPU-driven indirect draws from five more functions whose
 context argument is not yet confirmed.
 
-**Next.**
-1. Probe 6: for repeated engine draw calls on the same (technique, geometry, material), hash the PM4 dwords
-   between begin and end and compare frame to frame. That decides what an engine-level prepared draw can skip.
-2. Design note for the L3 backend, then a prototype for DrawItem.
+## Probe 6: packet streams per engine draw key (run l3p6, 15:40)
+
+For DrawItem and DrawInstanced, the packets between begin and end are recorded and compared with the previous
+call on the same key (technique, geometry, material or part). `[l3-stream]` lines.
+
+- **An engine draw is tiny: 17 dwords at the menu, 21 in the world.** Packets per call: one or two
+  indirect-register loads (`0x63` SH list, `0x64` context list, sometimes `0x9f`), one `SET_SH_REG` (`0x76`),
+  `NUM_INSTANCES` (`0x2f`) and the `DRAW_INDEX_2` (`0x27`). All per-draw state lives in memory behind the
+  register lists and the user-data pointer, not in the packets.
+- Menu: 6,545 repeats per 10 s on 128 keys; 3 identical, 6,542 differing, 264 with a different packet shape.
+- World: 26,000 repeats on 9,800 keys; 0 identical.
+- What differs: every `0x63`/`0x64`/`0x9f` packet (the list address moves: a ring), every `0x76` (user-data
+  pointer pair SH `0x8c`/`0x8d`, plus `0xc`/`0x2a`/`0x92`/`0x96`/`0x22`/`0x26` less often). The draw packet
+  itself never differs; `NUM_INSTANCES` differs in 3%.
+- Conclusion: packet dwords are the wrong thing to key a prepared draw on. The question is whether the
+  *contents* behind the moving addresses repeat (probe 7).
+
+## Probe 7: register-list and user-block contents per key (run l3p7)
+
+The worker reads each indirect-register list (offset, value pairs) and 16 dwords behind the SH `0x8c` pointer
+when it sees the packets, and compares them per key. `[l3-contents]` lines.
+
+**The GPU state behind the moving addresses is static per key.**
+
+| Phase | Repeats with identical contents | Differing | Different size | Differing dwords | Of them in the user block |
+|---|---|---|---|---|---|
+| Menu | 5,780 | 518 | 376 | 746 of 197,804 | 746 (100%) |
+| World | 17,200 | 8,200 | 1,000 | 30,000 of 1,060,000 | 29,900 (99.5%) |
+
+- Register lists (the SH and context register values the engine stores in memory per draw): identical frame to
+  frame for the same (technique, geometry, material). In the world, only six registers ever differ, about
+  100 times per 10 s out of 25,000 calls (`0x205`, `0x242`, `0x25b`, `0x260`, `0x262`, `0x81`).
+- The only per-frame change is the per-draw constant block behind the user-data pointer at SH `0x8c`
+  (transforms and the like), which the GPU reads directly.
+- "Different size" (4%) are calls whose lists changed length: a different technique variant or LOD on the same
+  objects.
+
+**Conclusion for the L3 backend.** A prepared draw can be keyed by the engine objects. The register decode,
+key hashing and validation that the driver repeats per packet today can be replaced by: look up the key, check
+the register-list hash (cheap, or skip when the engine object has not changed), re-point the user-data constant
+buffer, commit. This is the prototype's design (`l3-backend-design.md`).
+
+## Run bookkeeping
+
+Runs l3p1-l3p7 (2026-10-24 14:24-15:56) each: Ezo save (zip-b) swapped in, 60 s menu, CONTINUE, 180 s world,
+stop. Deployed libs during l3p2-l3p7 were the ps5-porter builds; the 1afe29a87 originals and the zip-b save were
+restored at 15:57 (`deploy-porter.ps1 -Restore`). Logs: `yotei-work/runs-best/run-l3p*.err.log`,
+`monitor-l3p*.csv`, `porter-l3p*.log`.

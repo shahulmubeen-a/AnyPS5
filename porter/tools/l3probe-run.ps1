@@ -1,4 +1,4 @@
-param([string]$Tag = 'l3p1', [int]$MenuHold = 60, [int]$WorldSeconds = 180, [string]$Hooks = "$PSScriptRoot\..\hooks\PPSA26344-l3probe.hooks", [string]$ExtraEnv = '')
+param([string]$Tag = 'l3p1', [int]$MenuHold = 60, [int]$WorldSeconds = 180, [string]$Hooks = "$PSScriptRoot\..\hooks\PPSA26344-l3probe.hooks", [string]$ExtraEnv = '', [int]$TimeoutMin = 20)
 # L3 probe run: boots the PPSA26344-best runtime on the Ezo save with a probe hook table, holds the main menu for
 # $MenuHold s, presses CONTINUE (ezo-run.ps1), lets the world run for $WorldSeconds s and stops the game.
 # $ExtraEnv adds switches as "NAME=value;NAME2=value2".
@@ -11,7 +11,7 @@ Note "start, hooks $((Resolve-Path $Hooks).Path), extra env '$ExtraEnv'"
 try {
     $runEnv = @{ APS5_GUEST_HOOKS = (Resolve-Path $Hooks).Path; APS5_GUEST_HOOKS_LOG = '8'; APS5_PROFILE_DRAW = '1' }
     foreach ($pair in ($ExtraEnv -split ';' | Where-Object { $_ -match '=' })) { $name, $value = $pair -split '=', 2; $runEnv[$name] = $value }
-    & (Join-Path $tools 'ezo-run.ps1') -Tag $Tag -MenuHold $MenuHold -TimeoutMin 20 -Env $runEnv *>&1 | ForEach-Object { Note "$_" }
+    & (Join-Path $tools 'ezo-run.ps1') -Tag $Tag -MenuHold $MenuHold -TimeoutMin $TimeoutMin -Env $runEnv *>&1 | ForEach-Object { Note "$_" }
     Note 'continue pressed, world phase'
     Start-Sleep -Seconds $WorldSeconds
 } catch {

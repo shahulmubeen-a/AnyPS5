@@ -1,0 +1,14 @@
+# L3 probe 1 (2026-10-24): counts calls of the engine renderer functions found by static analysis
+# (yotei-work/porter/l3-engine-hooks.md) and logs the first calls' arguments. Nothing in the game changes.
+# Compare the [hooks] counts per 10 s with the presented frames and the driver's draw counts.
+# Load with APS5_GUEST_HOOKS=<this file>; APS5_GUEST_HOOKS_LOG sets how many calls args/dump print (default 16).
+# Expected bytes = the 13-byte prologue push rbp; mov rbp,rsp; push r15..r12; push rbx (b813f0 differs).
+dump   0xc53710   554889e5415741564155415453  l3-drawitem
+args   0xc51d40   554889e5415741564155415453  l3-drawinstanced
+args   0xc52010   554889e5415741564155415453  l3-drawinstanced-b
+dump   0x13da590  554889e5415741564155415453  l3-bindmaterial
+count  0x13da860  554889e5415741564155415453  l3-bindimages
+count  0x13d9bd0  554889e5415741564155415453  l3-bindsamplers
+args   0xc545f0   554889e5415741564155415453  l3-passjob
+count  0xb81270   554889e5415741564155415453  l3-dispatch
+count  0xb813f0   554889e541565348            l3-dispatchindirect
