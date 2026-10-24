@@ -264,6 +264,16 @@ DrawPipeline& DrawPipeline::Queue0() {
     return *pipeline;
 }
 
+// Porter element rules ("pipedepth <n>", "prepahead <n>") override the pipeline depth and the preparer's look-ahead
+// live; 0 = the switch values. The depth override never turns pipelining on or off, it only resizes a non-zero depth.
+std::atomic<std::size_t> depthOverride{0};
+std::atomic<std::size_t> prepareAheadOverride{0};
+
+void DrawPipeline::OverrideDepth(std::size_t depth, std::size_t prepareAhead) {
+    depthOverride.store(std::min<std::size_t>(depth, 1024), std::memory_order_relaxed);
+    prepareAheadOverride.store(std::min<std::size_t>(prepareAhead, 256), std::memory_order_relaxed);
+}
+
 std::size_t DrawPipeline::Depth() {
     static const std::size_t depth = [] {
         const char* text = std::getenv("APS5_PIPELINED_DRAWS");
@@ -273,7 +283,8 @@ std::size_t DrawPipeline::Depth() {
         const auto value = std::strtoull(text, nullptr, 10);
         return value == 0 ? std::size_t{0} : value == 1 ? standard : static_cast<std::size_t>(std::min<unsigned long long>(value, 256));
     }();
-    return depth;
+    const auto live = depthOverride.load(std::memory_order_relaxed);
+    return depth != 0 && live != 0 ? live : depth;
 }
 
 std::size_t DrawPipeline::PrepareAhead() {
@@ -282,7 +293,8 @@ std::size_t DrawPipeline::PrepareAhead() {
         const auto value = text != nullptr ? std::strtoull(text, nullptr, 10) : 16ull;
         return static_cast<std::size_t>(std::clamp<unsigned long long>(value, 1ull, 256ull));
     }();
-    return ahead;
+    const auto live = prepareAheadOverride.load(std::memory_order_relaxed);
+    return live != 0 ? live : ahead;
 }
 
 bool DrawPipeline::PrepareSlot::Begin() {

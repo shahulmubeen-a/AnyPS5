@@ -56,6 +56,8 @@ public:
 
     static DrawPipeline& Queue0();
     static std::size_t Depth();
+    // Live overrides of Depth() and PrepareAhead() (porter element rules); 0 = the switch values.
+    static void OverrideDepth(std::size_t depth, std::size_t prepareAhead);
     static std::size_t QueuedItems();
     static bool PipelineIndirect();
     static bool DrainBeforeRead(std::uint64_t address, std::size_t bytes);

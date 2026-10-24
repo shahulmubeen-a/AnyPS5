@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawTiming.hpp"
@@ -142,6 +143,8 @@ struct Rules {
     bool any = false;
     bool guest = false;
     int lockPriority = -1;
+    std::size_t pipeDepth = 0;
+    std::size_t prepareAhead = 0;
     // gpoke <va> <u32>: a 4-byte value written into the game's data at an eboot VA while the rule is listed.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> pokes;
     // switch <APS5_NAME> on|off: a runtime switch of the in-run A/B registry set live while listed.
@@ -260,6 +263,8 @@ void Reload(const char* path) {
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
         else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
+        else if (verb == "pipedepth") next->pipeDepth = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
+        else if (verb == "prepahead") next->prepareAhead = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "switch") {
             std::istringstream values(rest);
             std::string name, value;
@@ -276,6 +281,7 @@ void Reload(const char* path) {
     next->guest = !next->gkinds.empty() || !next->gvas.empty() || !next->gmaterials.empty();
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
     GuestMemory::SetGpuLockPriority(next->lockPriority);
+    DriverDetail::DrawPipeline::OverrideDepth(next->pipeDepth, next->prepareAhead);
     ApplyPokes(*next);
     ApplySwitches(*next);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
