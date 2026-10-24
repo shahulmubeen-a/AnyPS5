@@ -24,6 +24,7 @@
 //   queue <hex>   skip every draw and dispatch on this queue
 //   gkind/gva/gmat ...  the same at the guest: the engine function returns at once, so the title never
 //                 writes the packets (porter L3 hooks only)
+//   every <n>     pass/passx rules listed after this line skip their pass except on every n-th present
 //   lockprio on|off  queue 0's worker and the draw committer take GpuMutex first (APS5_GPU_LOCK_PRIORITY, live)
 //   gpoke <va> <u32>  writes a dword into the game's data at an eboot VA while listed (engine knobs, e.g. the
 //                 shadow cascade count at 0x213d794); the original value comes back when the line goes
@@ -45,6 +46,8 @@ struct Tag {
     std::uint32_t programSlot = 0;
 };
 Tag CurrentTag();
+// Counts presents (queue 0's flips) for the "every <n>" rules.
+void NoteFlip();
 
 class PacketScope {
 public:

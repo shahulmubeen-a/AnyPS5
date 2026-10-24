@@ -138,6 +138,9 @@ std::string LabelText(std::uint32_t slot) {
 struct Rules {
     std::uint64_t generation = 0;
     std::vector<std::string> passes, passDraws, passDispatches, passExact;
+    // Pass rules listed after an "every <n>" line: the pass runs only on every n-th frame (presents).
+    std::vector<std::string> periodicPasses, periodicExact;
+    std::uint64_t period = 0;
     std::vector<std::uint64_t> programs, vas, materials, gvas, gmaterials;
     std::vector<std::uint32_t> kinds, gkinds, queues;
     bool any = false;
@@ -250,7 +253,13 @@ void Reload(const char* path) {
         if (rest.empty()) continue;
         const auto hex = std::strtoull(rest.c_str(), nullptr, 16);
         ++count;
-        if (verb == "pass") next->passes.push_back(rest);
+        if (verb == "every") {
+            next->period = std::strtoull(rest.c_str(), nullptr, 10);
+            --count;
+        }
+        else if (verb == "pass" && next->period > 1) next->periodicPasses.push_back(rest);
+        else if (verb == "passx" && next->period > 1) next->periodicExact.push_back(rest);
+        else if (verb == "pass") next->passes.push_back(rest);
         else if (verb == "passd") next->passDraws.push_back(rest);
         else if (verb == "passc") next->passDispatches.push_back(rest);
         else if (verb == "passx") next->passExact.push_back(rest);
@@ -310,6 +319,8 @@ struct WorkerCache {
     std::uint32_t label = static_cast<std::uint32_t>(LabelSlots);
 };
 
+std::atomic<std::uint64_t> presents{0};
+
 thread_local WorkerCache cache;
 thread_local std::uint32_t lastLabel = ~0u;
 thread_local Tag current;
@@ -357,6 +368,7 @@ std::uint32_t LabelSkipMask(std::uint32_t slot, const Rules& active) {
     if (LabelMatches(active.passDraws, text)) mask |= 1u;
     if (LabelMatches(active.passDispatches, text)) mask |= 2u;
     if (Contains(active.passExact, text)) mask |= 3u;
+    if (LabelMatches(active.periodicPasses, text) || Contains(active.periodicExact, text)) mask |= 12u;
     entry->skipMask.store(mask, std::memory_order_relaxed);
     entry->skipGeneration.store(active.generation, std::memory_order_release);
     return mask;
@@ -389,6 +401,10 @@ const bool enabled = [] {
 
 bool Enabled() {
     return enabled;
+}
+
+void NoteFlip() {
+    presents.fetch_add(1, std::memory_order_relaxed);
 }
 
 Tag CurrentTag() {
@@ -439,6 +455,7 @@ bool PacketScope::Begin(std::uint32_t queueId, const QueueState& queue, std::uin
     if (!skip) {
         const auto mask = LabelSkipMask(current.label, *active);
         skip = (mask & (type == Draw ? 1u : 2u)) != 0;
+        if (!skip && active->period > 1 && (mask & (type == Draw ? 4u : 8u)) != 0) skip = presents.load(std::memory_order_relaxed) % active->period != 0;
     }
     if (!skip && type == Dispatch) skip = Contains(active->programs, program);
     if (!skip && type == Draw && currentEngineKey != 0) {
