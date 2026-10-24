@@ -4,34 +4,37 @@
 # draw packets between begin and end to the engine, lists the programs and guest call sites of the other
 # ("foreign") draws and prints "[l3]", "[l3-foreign]", "[l3-sites]" and "[l3-other]" lines every 10 s.
 # Load with APS5_GUEST_HOOKS=<this file> and APS5_PORTER_L3=1.
-l3-item         0xc53710   554889e5415741564155415453  l3-drawitem
-l3-instanced    0xc51d40   554889e5415741564155415453  l3-drawinstanced
-l3-instanced-b  0xc52010   554889e5415741564155415453  l3-drawinstanced-b
-l3-material     0x13da590  554889e5415741564155415453  l3-bindmaterial
-count           0xc545f0   554889e5415741564155415453  l3-passjob
+l3-item 0xc53710 554889e54157415641554154534881ec28020000488b0575 l3-drawitem
+l3-instanced 0xc51d40 554889e5415741564155415453500fb647184d89c54989ce l3-drawinstanced
+l3-instanced-b 0xc52010 554889e54157415641554154534883ec28488b0578732201 l3-drawinstanced-b
+l3-material 0x13da590 554889e54157415641554154534883ec184885d20f844302 l3-bindmaterial
+count 0xc545f0 554889e54157415641554154534881ecb8030000488b0595 l3-passjob
 # Other engine draw functions found by probe 4's foreign call sites. Each takes the context as its second
 # argument (decompiled bodies in yotei-work/porter/out/dec-yotei-foreign*.c use param_2+0x10/+0x18/+0x38).
-l3-other        0xdfb200   554889e5415741564155415453  l3-other-dfb200
-l3-other        0x157a3a0  41837808000f84bc030000      l3-other-157a3a0
-l3-other        0x13dbac0  554889e54157415641545348    l3-other-13dbac0
-l3-other        0xcce740   554889e5415741564155415453  l3-other-cce740
-l3-other        0xba7e70   554889e5415741564155415453  l3-other-ba7e70
-l3-other        0xdf9e60   554889e5415741564155415453  l3-other-df9e60
-l3-other        0x13ac930  554889e5415741564155415453  l3-other-13ac930
-l3-other        0x13db610  554889e5415741564155415453  l3-other-13db610
-l3-other        0x1268630  554889e5415741564155415453  l3-other-1268630
-l3-other        0x1579220  554889e5415741564155415453  l3-other-1579220
-l3-other        0x1257ee0  554889e5415741564155415453  l3-other-1257ee0
+l3-other 0xdfb200 554889e54157415641554154534881ec380300004189cf48 l3-other-dfb200
+# 0x157a3a0 starts with an early-out (cmp dword [r8+8], 0; je rel32) that a far hook cannot relocate; the hook sits on
+# the standard prologue right after it (0x157a3ab), where the arguments and the return address are still as at entry.
+l3-other 0x157a3ab 554889e54157415641554154534883ec28488b024989ff49 l3-other-157a3a0
+l3-other 0x13dbac0 554889e5415741564154534883ec304c8b25cad8a9004889 l3-other-13dbac0
+l3-other 0xcce740 554889e54157415641554154534883ec484c8b3d48ac1a01 l3-other-cce740
+l3-other 0xba7e70 554889e54157415641554154534881ecc8010000488b0515 l3-other-ba7e70
+l3-other 0xdf9e60 554889e54157415641554154534881ec38040000488b0525 l3-other-df9e60
+l3-other 0x13ac930 554889e54157415641554154534883ec58488b0558caac00 l3-other-13ac930
+l3-other 0x13db610 554889e54157415641554154534883ec584c8b2578dda900 l3-other-13db610
+l3-other 0x1268630 554889e54157415641554154534881eca80000004c8b2d55 l3-other-1268630
+l3-other 0x1579220 554889e54157415641554154534881ecd8070000488b0565 l3-other-1579220
+l3-other 0x1257ee0 554889e54157415641554154534881ecc8000000488b05a5 l3-other-1257ee0
 # Low-rate indirect-draw functions, confirmed from their decompiles (yotei-work/porter/out/dec-yotei-foreign3.c):
 # the context is the first argument (0x159acb0), the third (0x1577dd0, 0x15786f0), the second (0x13dbec0) or
 # the pointer the second argument points at (0x1266b10, 0x126cb10).
-l3-other-rsi-deref 0x1266b10  554889e5415741564155415453  l3-other-1266b10
-l3-other-rdi    0x159acb0  554889e5415741564155415453  l3-other-159acb0
-l3-other-rdx    0x1577dd0  554889e5415741564155415453  l3-other-1577dd0
-l3-other-rdx    0x15786f0  554889e5415741564155415453  l3-other-15786f0
-l3-other        0x13dbec0  554889e54157415641545348    l3-other-13dbec0
-l3-other-rsi-deref 0x126cb10  554889e54157415641545348    l3-other-126cb10
+l3-other-rsi-deref 0x1266b10 554889e54157415641554154534881ec98000000488b1d75 l3-other-1266b10
+l3-other-rdi 0x159acb0 554889e54157415641554154534881ec08010000488b05d5 l3-other-159acb0
+l3-other-rdx 0x1577dd0 554889e54157415641554154534881ecf8280000488b05b5 l3-other-1577dd0
+l3-other-rdx 0x15786f0 554889e54157415641554154534881ecf8280000488b0595 l3-other-15786f0
+l3-other 0x13dbec0 554889e5415741564154534883ec404c8b25cad4a9004885 l3-other-13dbec0
+l3-other-rsi-deref 0x126cb10 554889e5415741564154534883ec104c8b357ac8c000498b l3-other-126cb10
 # Engine Dispatch (technique, ctx, x, y, z) and DispatchIndirect: names and programs of compute techniques only
 # (APS5_ELEM_NAMES=1), no marker.
-l3-dispatch     0xb81270   554889e5415741564155415453  l3-dispatch
-l3-dispatch     0xb813f0   554889e541565348            l3-dispatch-indirect
+l3-dispatch 0xb81270 554889e54157415641554154534883ec184c8b2d18812f01 l3-dispatch
+# DispatchIndirect 0xb813f0 has a RIP-relative load in its first 14 bytes, which a far hook cannot relocate.
+# l3-dispatch     0xb813f0   554889e541565348            l3-dispatch-indirect

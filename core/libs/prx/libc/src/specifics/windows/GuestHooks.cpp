@@ -24,6 +24,10 @@ extern "C" void GuestHookEnter_nid_no_patch();
 namespace {
 
 constexpr std::size_t JumpBytes = 5;
+// When no block can be allocated within reach of a rel32 jump (the guest memory manager may have reserved the
+// address space around the image), the hook block goes anywhere and the entry gets a 14-byte absolute jump
+// (jmp qword [rip+0]; dq stub) instead.
+constexpr std::size_t FarJumpBytes = 14;
 constexpr std::size_t SlotBytes = 128;
 constexpr std::size_t BlockBytes = 1u << 20;
 constexpr std::size_t MaxHandlers = 64;
@@ -58,6 +62,7 @@ std::mutex g_installMutex;
 std::deque<HookState> g_states;
 std::uint8_t* g_block = nullptr;
 std::size_t g_blockUsed = 0;
+bool g_blockFar = false;
 bool g_reporterStarted = false;
 
 std::mutex g_printMutex;
@@ -424,23 +429,28 @@ bool InstallGuestHook_nid_no_patch(void* address, const std::uint8_t* expected, 
         Explain(why, whyBytes, std::string("bytes differ: found ") + Hex(target, expectedBytes) + ", expected " + Hex(expected, expectedBytes));
         return false;
     }
-    std::array<GuestHookInstruction, 8> plan{};
-    std::size_t planned = 0;
-    std::size_t covered = 0;
-    while (covered < JumpBytes) {
-        if (planned == plan.size() || !DecodeGuestHookInstruction_nid_no_patch(target + covered, expectedBytes - covered, &plan[planned])) {
-            Explain(why, whyBytes, "unsupported instruction at +" + std::to_string(covered) + " (" + Hex(target + covered, std::min<std::size_t>(8, expectedBytes - covered)) + ") or expected bytes too short to cover it");
-            return false;
-        }
-        covered += plan[planned++].length;
-    }
     std::lock_guard lock(g_installMutex);
     if (g_block == nullptr) {
         g_block = AllocateNear(reinterpret_cast<std::uintptr_t>(target));
         if (g_block == nullptr) {
-            Explain(why, whyBytes, "no executable block within 2 GB of the image");
+            g_block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+            g_blockFar = g_block != nullptr;
+        }
+        if (g_block == nullptr) {
+            Explain(why, whyBytes, "no executable block could be allocated");
             return false;
         }
+    }
+    const std::size_t needed = g_blockFar ? FarJumpBytes : JumpBytes;
+    std::array<GuestHookInstruction, 12> plan{};
+    std::size_t planned = 0;
+    std::size_t covered = 0;
+    while (covered < needed) {
+        if (planned == plan.size() || !DecodeGuestHookInstruction_nid_no_patch(target + covered, expectedBytes - covered, &plan[planned])) {
+            Explain(why, whyBytes, "unsupported instruction at +" + std::to_string(covered) + " (" + Hex(target + covered, std::min<std::size_t>(8, expectedBytes - covered)) + ") or expected bytes too short to cover " + std::to_string(needed) + " bytes");
+            return false;
+        }
+        covered += plan[planned++].length;
     }
     if (g_blockUsed + SlotBytes > BlockBytes) {
         Explain(why, whyBytes, "hook block is full");
@@ -478,7 +488,7 @@ bool InstallGuestHook_nid_no_patch(void* address, const std::uint8_t* expected, 
     std::memcpy(stub + 10, jumpBack, sizeof(jumpBack));
     Put64(stub + 16, reinterpret_cast<std::uint64_t>(&GuestHookEnter_nid_no_patch));
     const auto relative = reinterpret_cast<std::intptr_t>(stub) - reinterpret_cast<std::intptr_t>(target + JumpBytes);
-    if (!Fits32(relative)) {
+    if (!g_blockFar && !Fits32(relative)) {
         Explain(why, whyBytes, "stub out of reach of a 5-byte jump");
         return false;
     }
@@ -490,11 +500,16 @@ bool InstallGuestHook_nid_no_patch(void* address, const std::uint8_t* expected, 
     record->resume = trampoline;
     record->state = &state;
     FlushInstructionCache(GetCurrentProcess(), slot, SlotBytes);
-    std::array<std::uint8_t, 16> patch{};
+    std::array<std::uint8_t, 64> patch{};
     patch.fill(0xcc);
-    patch[0] = 0xe9;
-    const auto narrowed = static_cast<std::int32_t>(relative);
-    std::memcpy(patch.data() + 1, &narrowed, sizeof(narrowed));
+    if (g_blockFar) {
+        std::memcpy(patch.data(), jumpBack, sizeof(jumpBack));
+        Put64(patch.data() + sizeof(jumpBack), reinterpret_cast<std::uint64_t>(stub));
+    } else {
+        patch[0] = 0xe9;
+        const auto narrowed = static_cast<std::int32_t>(relative);
+        std::memcpy(patch.data() + 1, &narrowed, sizeof(narrowed));
+    }
     DWORD old = 0;
     if (!VirtualProtect(target, covered, PAGE_EXECUTE_READWRITE, &old)) {
         g_states.pop_back();
