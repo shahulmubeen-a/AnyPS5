@@ -439,7 +439,7 @@ void Driver::execute(const Submission& submission) {
         // Porter element costs (APS5_ELEM / APS5_ELEM_FILE): times this iteration and may skip a draw or dispatch
         // that a live skip rule names, before any drain, flush or memory preparation.
         Elements::PacketScope elementScope;
-        if (Elements::Enabled() && header != FlipPacketHeader && elementScope.Begin(submission.queue, queue, opcode, Pm4::DrawOpcode(opcode))) {
+        if (Elements::Enabled() && header != FlipPacketHeader && elementScope.Begin(submission.queue, queue, opcode, Pm4::DrawOpcode(opcode), cursor)) {
             recent.Record(cursor);
             cursor = nextCursor;
             if (ahead != nullptr) ahead->Skip(aheadSegment, cursor);

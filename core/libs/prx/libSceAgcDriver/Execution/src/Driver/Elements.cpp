@@ -44,6 +44,9 @@ struct Entry {
     // labels: generation of the skip decision below.
     std::atomic<std::uint64_t> skipGeneration{0};
     std::atomic<std::uint32_t> skipMask{0};
+    // labels: the dword offsets inside the submission where queue 0 entered the label (frame order).
+    std::atomic<std::uint64_t> orderSum{0};
+    std::atomic<std::uint64_t> orderCount{0};
 };
 
 constexpr std::uint64_t Mix(std::uint64_t value) {
@@ -197,6 +200,7 @@ struct WorkerCache {
 };
 
 thread_local WorkerCache cache;
+thread_local std::uint32_t lastLabel = ~0u;
 thread_local Tag current;
 thread_local std::uint64_t currentEngineKey = 0;
 thread_local std::uint64_t currentMaterial = 0;
@@ -280,12 +284,19 @@ Tag CurrentTag() {
     return enabled ? current : Tag{};
 }
 
-bool PacketScope::Begin(std::uint32_t queueId, const QueueState& queue, std::uint32_t opcode, bool draw) {
+bool PacketScope::Begin(std::uint32_t queueId, const QueueState& queue, std::uint32_t opcode, bool draw, std::size_t offset) {
     active = true;
     start = std::chrono::steady_clock::now();
     type = draw ? Draw : (opcode == 0x15 || opcode == 0x16) ? Dispatch : (opcode == 0x3c || opcode == 0x93) ? Wait : Other;
     current = {};
     current.label = LabelFor(queueId, queue);
+    if (current.label != lastLabel) {
+        lastLabel = current.label;
+        if (auto* entry = Labels().At(current.label); entry != nullptr && queueId == 0) {
+            entry->orderSum.fetch_add(offset, std::memory_order_relaxed);
+            entry->orderCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     current.engineSlot = static_cast<std::uint32_t>(EngineSlots);
     current.materialSlot = static_cast<std::uint32_t>(MaterialSlots);
     current.programSlot = static_cast<std::uint32_t>(ProgramSlots);
@@ -450,7 +461,10 @@ void Report() {
         text += "\n";
         for (std::size_t index = 0; index < std::min(top, labels.size()); ++index) {
             const auto& [slot, d] = labels[index];
-            std::snprintf(line, sizeof(line), "[elem-pass] %llu %.1f %.1f %.1f %.1f %llu %llu %llu %llu %s\n", static_cast<unsigned long long>(round), Ms(d.ns), Ms(d.commitNs), Ms(d.prepareNs), Ms(d.waitNs), static_cast<unsigned long long>(d.draws), static_cast<unsigned long long>(d.dispatches), static_cast<unsigned long long>(d.packets), static_cast<unsigned long long>(d.skipped), LabelText(slot).c_str());
+            const auto& labelEntry = Labels().entries[slot];
+            const auto orders = labelEntry.orderCount.load(std::memory_order_relaxed);
+            const auto order = orders != 0 ? labelEntry.orderSum.load(std::memory_order_relaxed) / orders : 0;
+            std::snprintf(line, sizeof(line), "[elem-pass] %llu %.1f %.1f %.1f %.1f %llu %llu %llu %llu @%llu %s\n", static_cast<unsigned long long>(round), Ms(d.ns), Ms(d.commitNs), Ms(d.prepareNs), Ms(d.waitNs), static_cast<unsigned long long>(d.draws), static_cast<unsigned long long>(d.dispatches), static_cast<unsigned long long>(d.packets), static_cast<unsigned long long>(d.skipped), static_cast<unsigned long long>(order), LabelText(slot).c_str());
             text += line;
         }
         const auto engines = Deltas(Engines(), lastEngines);

@@ -13,7 +13,7 @@ import json
 import re
 
 ROUND = re.compile(r"^\[elem\] round (\d+) \(10 s\): (\d+) labels active; per queue worker/commit ms:(.*)$")
-PASS = re.compile(r"^\[elem-pass\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (\d+) (\d+) (.*)$")
+PASS = re.compile(r"^\[elem-pass\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (\d+) (\d+) (?:@(\d+) )?(.*)$")
 ENGINE = re.compile(r"^\[elem-engine\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) kind=(\d+) va=(0x[0-9a-f]+)$")
 MAT = re.compile(r"^\[elem-mat\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (0x[0-9a-f]+) (.*)$")
 PROG = re.compile(r"^\[elem-prog\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (\S) (0x[0-9a-f]+) (0x[0-9a-f]+) (.*)$")
@@ -56,6 +56,7 @@ def main():
     progs = collections.defaultdict(lambda: [0.0] * 5)
     prog_label = {}
     presents = []
+    order = {}
     current = None
     for line in lines:
         if m := ROUND.match(line):
@@ -77,10 +78,12 @@ def main():
         if m := PASS.match(line):
             if int(m.group(1)) not in chosen:
                 continue
-            key = fold(m.group(10), args.group_depth)
+            key = fold(m.group(11), args.group_depth)
             row = passes[key]
             for i in range(8):
                 row[i] += float(m.group(2 + i))
+            if m.group(10) is not None:
+                order[key] = min(order.get(key, 1 << 62), int(m.group(10)))
         elif m := ENGINE.match(line):
             if int(m.group(1)) not in chosen:
                 continue
@@ -111,10 +114,10 @@ def main():
     def per(value):
         return value / count
 
-    print(f"\npasses (avg per 10 s): worker commit prepare wait draws dispatches packets skipped label")
+    print(f"\npasses (avg per 10 s): worker commit prepare wait draws dispatches packets skipped order label")
     rows = sorted(passes.items(), key=lambda kv: -(kv[1][0] + kv[1][1] + kv[1][2]))
     for key, r in rows[:args.top]:
-        print(f"{per(r[0]):8.1f} {per(r[1]):8.1f} {per(r[2]):7.1f} {per(r[3]):7.1f} {per(r[4]):7.0f} {per(r[5]):7.0f} {per(r[6]):7.0f} {per(r[7]):6.0f}  {key}")
+        print(f"{per(r[0]):8.1f} {per(r[1]):8.1f} {per(r[2]):7.1f} {per(r[3]):7.1f} {per(r[4]):7.0f} {per(r[5]):7.0f} {per(r[6]):7.0f} {per(r[7]):6.0f} {order.get(key, -1):8d}  {key}")
     print(f"\nengine functions (avg per 10 s): worker commit prepare draws skipped kind")
     for key, r in sorted(engines.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))[:args.top]:
         print(f"{per(r[0]):8.1f} {per(r[1]):8.1f} {per(r[2]):7.1f} {per(r[3]):7.0f} {per(r[4]):6.0f}  {key}")
@@ -130,6 +133,7 @@ def main():
             "presents_per_10s": frames,
             "queues": {q: [w / count, c / count] for q, (w, c) in queues.items()},
             "passes": {k: [v / count for v in r] for k, r in passes.items()},
+            "order": order,
             "engines": {k: [v / count for v in r] for k, r in engines.items()},
             "materials": {k: [v / count for v in r] + [mat_label.get(k, "")] for k, r in mats.items()},
             "programs": {" ".join(k): [v / count for v in r] + [prog_label.get(k, "")] for k, r in progs.items()},

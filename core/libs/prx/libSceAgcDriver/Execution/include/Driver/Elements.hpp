@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_ELEMENTS_HPP
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 // Porter element costs (APS5_ELEM=1 or APS5_ELEM_FILE=<control file>): every packet a queue worker executes is
@@ -47,7 +48,8 @@ public:
     PacketScope(const PacketScope&) = delete;
     PacketScope& operator=(const PacketScope&) = delete;
     // Starts timing the packet; returns true when the packet is a draw or dispatch that a skip rule removes.
-    bool Begin(std::uint32_t queueId, const QueueState& queue, std::uint32_t opcode, bool draw);
+    // `offset`: the packet's dword offset in its submission (frame order of queue-0 passes).
+    bool Begin(std::uint32_t queueId, const QueueState& queue, std::uint32_t opcode, bool draw, std::size_t offset);
     ~PacketScope();
 
 private:
