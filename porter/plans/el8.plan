@@ -1,0 +1,16 @@
+# el8 (2026-10-25): engine knobs on the full game (the game itself draws less): shadow distance, shadow cascades,
+# then the detail ladder level (last: in an older build it set off texture rebuilds that did not recover).
+measure 60
+shadowdist5000 75 gpoke 213d7ac 459c4000
+base-1 75
+shadowdist2500 75 gpoke 213d7ac 451c4000
+cascades2 75 gpoke 213d794 2
+base-2 75
+csm2-sd5000 75 gpoke 213d794 2;;gpoke 213d7ac 459c4000
+base-3 75
+ladder4 75 gpoke 509e1b0 4
+base-4 75
+ladder8 75 gpoke 509e1b0 8
+base-5 75
+ladder12 75 gpoke 509e1b0 c
+base-6 75
