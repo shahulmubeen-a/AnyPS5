@@ -35,3 +35,23 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   40 fps (the game itself is fast). lockprio: no gain. Cascade count 2: +5%, 1: +10%.
 - el3 cumulative: shadows 2.07, +particles 2.32, +async extras 2.9, +post/water/misc 3.4 fps (post skip = raw colours);
   +instanced 2.0 (worse, unexplained), +items 3.1 (black screen).
+
+## Root causes (el4 trace + samplers, el3 commit phases)
+- Queue-0 worker per frame (trace, exclusive): waiting for the committer to drain 158 ms, committer queue full
+  52 ms, WAIT_REG_MEM 41 ms, GPU lock 30 ms, own draw translation ~121 ms, own compute translation ~73 ms.
+- Committer per frame: draw recording 114 ms + resources 76 ms + GPU syncs (Recorder.Sync) 67 ms + more; idle ~214 ms.
+- Nearly every dispatch misses the dispatch cache (~23,000 misses per 10 s, [dispatch-item]), so it is not pipelined:
+  the worker drains the committer and runs it itself. APS5_PIPELINE_DISPATCH_MISSES (runtime switch) hands misses to
+  the committer: +14% on the lean configuration (el5).
+- Single-item stalls of 40-60 ms per frame each: Interior Volumes (commit prepare = GPU wait), Deferred wetness
+  (drain), Cull CS Lights and Ambient Spec Update (q38 prologue), Directional Shadow Combine (q30 prologue). Removing
+  one moves the wait to the next sync point; that is why single cuts barely help.
+- GPU (APS5_PROFILE_GPU, el4): ~193 ms of program time per frame; particles (0x801f64cc00 Emit 29 ms,
+  0x801f808700 19 ms), cloth (q51, ~40 ms), staging-in copies 41 ms, draws 52 ms.
+
+## Lean configurations (el5, no profiling)
+- lean-a (shadows, particles, async extras, water, grass, misc, post children): 3.47 fps, image broken (post).
+- lean-b (lean-a + Vcull, Proxy Set Fill Streams, CS Lights, cloth, terrain generation, CS Mesh, Displacement,
+  clipmap/deformation updates): **5.58 fps** (base in the same run 1.84-2.04), image: ground ok, sky area garbage.
+- Runtime switches on lean-c: pipeline dispatch misses +14%, quiet publish ~+9%, defer flip store ~+2%,
+  draw-ahead 0%, draw inputs in place ~+2% (noise ~5%).
