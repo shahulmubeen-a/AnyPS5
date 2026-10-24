@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchTiming.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
@@ -10,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -20,6 +23,8 @@
 #include <vector>
 
 namespace AgcDriver::Elements {
+
+using namespace AgcDriver::DriverDetail;
 
 namespace {
 
@@ -91,6 +96,17 @@ Table<LabelSlots>& Labels() { static auto* table = new Table<LabelSlots>(); retu
 Table<EngineSlots>& Engines() { static auto* table = new Table<EngineSlots>(); return *table; }
 Table<MaterialSlots>& Materials() { static auto* table = new Table<MaterialSlots>(); return *table; }
 Table<ProgramSlots>& Programs() { static auto* table = new Table<ProgramSlots>(); return *table; }
+
+// Worker phases (APS5_PROFILE_DRAW) per label and per program: dispatch phases at [0, DriverPhaseCount), draw
+// phases after them.
+constexpr std::size_t PhaseColumns = DriverPhaseCount + DrawDriverPhaseCount;
+using PhaseRow = std::array<std::atomic<std::uint64_t>, PhaseColumns>;
+std::vector<PhaseRow>& LabelPhases() { static auto* rows = new std::vector<PhaseRow>(LabelSlots); return *rows; }
+std::vector<PhaseRow>& ProgramPhases() { static auto* rows = new std::vector<PhaseRow>(ProgramSlots); return *rows; }
+
+const char* PhaseName(std::size_t column) {
+    return column < DriverPhaseCount ? DriverPhaseNames[column] : DrawDriverPhaseNames[column - DriverPhaseCount];
+}
 
 // Label strings: the key of a label entry is a 64-bit hash of its text; the text is kept here for the report.
 std::mutex textMutex;
@@ -367,6 +383,20 @@ void NoteDrawPrograms(std::uint64_t first, std::uint64_t last) {
     current.programSlot = ProgramSlot('d', first, last);
 }
 
+void NotePhases(bool dispatch, const double* ms, std::size_t count) {
+    if (!enabled || ms == nullptr) return;
+    const std::size_t base = dispatch ? 0 : DriverPhaseCount;
+    const std::size_t limit = dispatch ? DriverPhaseCount : DrawDriverPhaseCount;
+    PhaseRow* label = current.label < LabelSlots ? &LabelPhases()[current.label] : nullptr;
+    PhaseRow* program = current.programSlot < ProgramSlots ? &ProgramPhases()[current.programSlot] : nullptr;
+    for (std::size_t index = 0; index < std::min(count, limit); ++index) {
+        if (ms[index] <= 0) continue;
+        const auto ns = static_cast<std::uint64_t>(ms[index] * 1e6);
+        if (label != nullptr) (*label)[base + index].fetch_add(ns, std::memory_order_relaxed);
+        if (program != nullptr) (*program)[base + index].fetch_add(ns, std::memory_order_relaxed);
+    }
+}
+
 bool SkipDrawPrograms(std::uint64_t first, std::uint64_t last) {
     if (!enabled) return false;
     const auto* active = CurrentRules();
@@ -435,9 +465,39 @@ double Ms(std::uint64_t ns) {
     return static_cast<double>(ns) / 1e6;
 }
 
+// "[elem-ph] <round> <L|P> <slot text> total=<ms> <phase>=<ms>;..." for the top `count` rows of `rows`: the phases
+// of the round (deltas against `last`), largest first.
+template<std::size_t N>
+void PhaseLines(std::string& text, char kind, std::uint64_t round, const std::vector<std::pair<std::uint32_t, Snapshot>>& rows, std::vector<PhaseRow>& phases, std::vector<std::array<std::uint64_t, PhaseColumns>>& last, std::size_t count, const std::function<std::string(std::uint32_t)>& name) {
+    if (last.size() != N) last.assign(N, {});
+    for (std::size_t index = 0; index < std::min(count, rows.size()); ++index) {
+        const auto slot = rows[index].first;
+        if (slot >= N) continue;
+        std::array<std::pair<std::uint64_t, std::size_t>, PhaseColumns> deltas{};
+        std::uint64_t total = 0;
+        for (std::size_t column = 0; column < PhaseColumns; ++column) {
+            const auto now = phases[slot][column].load(std::memory_order_relaxed);
+            deltas[column] = {now - last[slot][column], column};
+            total += deltas[column].first;
+            last[slot][column] = now;
+        }
+        if (total == 0) continue;
+        std::sort(deltas.begin(), deltas.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        char line[160];
+        std::snprintf(line, sizeof(line), "[elem-ph] %llu %c total=%.1f", static_cast<unsigned long long>(round), kind, static_cast<double>(total) / 1e6);
+        text += line;
+        for (std::size_t column = 0; column < 6 && deltas[column].first != 0; ++column) {
+            std::snprintf(line, sizeof(line), " %s=%.1f;", PhaseName(deltas[column].second), static_cast<double>(deltas[column].first) / 1e6);
+            text += line;
+        }
+        text += " " + name(slot) + "\n";
+    }
+}
+
 void Report() {
     static const std::size_t top = [] { const char* text = std::getenv("APS5_ELEM_TOP"); return text != nullptr ? static_cast<std::size_t>(std::strtoul(text, nullptr, 10)) : std::size_t{80}; }();
     std::vector<Snapshot> lastLabels, lastEngines, lastMaterials, lastPrograms;
+    std::vector<std::array<std::uint64_t, PhaseColumns>> lastLabelPhases, lastProgramPhases;
     std::uint64_t round = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -467,6 +527,7 @@ void Report() {
             std::snprintf(line, sizeof(line), "[elem-pass] %llu %.1f %.1f %.1f %.1f %llu %llu %llu %llu @%llu %s\n", static_cast<unsigned long long>(round), Ms(d.ns), Ms(d.commitNs), Ms(d.prepareNs), Ms(d.waitNs), static_cast<unsigned long long>(d.draws), static_cast<unsigned long long>(d.dispatches), static_cast<unsigned long long>(d.packets), static_cast<unsigned long long>(d.skipped), static_cast<unsigned long long>(order), LabelText(slot).c_str());
             text += line;
         }
+        PhaseLines<LabelSlots>(text, 'L', round, labels, LabelPhases(), lastLabelPhases, 30, [](std::uint32_t slot) { return LabelText(slot); });
         const auto engines = Deltas(Engines(), lastEngines);
         for (std::size_t index = 0; index < std::min(top, engines.size()); ++index) {
             const auto& [slot, d] = engines[index];
@@ -490,6 +551,13 @@ void Report() {
             std::snprintf(line, sizeof(line), "[elem-prog] %llu %.1f %.1f %.1f %llu %llu %c 0x%llx 0x%llx %s\n", static_cast<unsigned long long>(round), Ms(d.ns), Ms(d.commitNs), Ms(d.prepareNs), static_cast<unsigned long long>(d.draws + d.dispatches), static_cast<unsigned long long>(d.skipped), static_cast<char>(first >> 56u), static_cast<unsigned long long>(first & ((std::uint64_t{1} << 56u) - 1u)), static_cast<unsigned long long>(entry.last.load(std::memory_order_relaxed)), LabelText(static_cast<std::uint32_t>(entry.aux.load(std::memory_order_relaxed))).c_str());
             text += line;
         }
+        PhaseLines<ProgramSlots>(text, 'P', round, programs, ProgramPhases(), lastProgramPhases, 30, [](std::uint32_t slot) {
+            const auto& entry = Programs().entries[slot];
+            const auto first = entry.first.load(std::memory_order_relaxed);
+            char name[64];
+            std::snprintf(name, sizeof(name), "%c 0x%llx 0x%llx", static_cast<char>(first >> 56u), static_cast<unsigned long long>(first & ((std::uint64_t{1} << 56u) - 1u)), static_cast<unsigned long long>(entry.last.load(std::memory_order_relaxed)));
+            return std::string(name);
+        });
         std::fputs(text.c_str(), stderr);
         std::fflush(stderr);
     }

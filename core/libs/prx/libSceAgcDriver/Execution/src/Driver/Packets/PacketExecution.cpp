@@ -542,6 +542,7 @@ void Driver::execute(const Submission& submission) {
             if (pending.phases) {
                 pending.ms[PhaseEpilogue] = std::chrono::duration<double, std::milli>(now - pending.tailAt).count();
                 addDriverPhases(submission.queue != 0 ? OtherQueues : indirect ? Queue0Indirect : Queue0Direct, pending.ms, pending.hit, pending.validated);
+                if (Elements::Enabled()) Elements::NotePhases(true, pending.ms.data(), pending.ms.size());
             }
             if (indirect) return;
             auto& row = packetProfile.dispatchOutcomes[static_cast<std::size_t>(pending.outcome)];
@@ -560,6 +561,7 @@ void Driver::execute(const Submission& submission) {
                 ms[DrawRowSkipped] = std::chrono::duration<double, std::milli>(now - packetTimer.start).count();
             }
             addDrawPhases(ms, drawn && pending.phases, pending.captures);
+            if (Elements::Enabled()) Elements::NotePhases(false, ms.data(), ms.size());
         };
         if (profilePackets) packetProfile.flushMs += std::chrono::duration<double, std::milli>(packetTimer.start - flushStart).count();
 
