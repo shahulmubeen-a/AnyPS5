@@ -1,9 +1,22 @@
-# L3 probe 2 (2026-10-24): the driver's l3-* handlers (APS5_PORTER_L3=1, Execution/src/Driver/EngineMarks.cpp)
-# write a NOP marker into the engine context's command buffer before each engine draw and material bind; the
-# driver attributes the following draw packets to it and prints "[l3]" lines every 10 s.
+# L3 probe 3 (2026-10-24): the driver's l3-* handlers (APS5_PORTER_L3=1, Execution/src/Driver/EngineMarks.cpp)
+# write a NOP marker into the engine context's command buffer before each engine draw and material bind, and the
+# draw handlers route the function's return through a stub that writes an end marker. The driver attributes the
+# draw packets between begin and end to the engine, lists the programs of the other ("foreign") draws and prints
+# "[l3]" and "[l3-foreign]" lines every 10 s.
 # Load with APS5_GUEST_HOOKS=<this file> and APS5_PORTER_L3=1.
 l3-item         0xc53710   554889e5415741564155415453  l3-drawitem
 l3-instanced    0xc51d40   554889e5415741564155415453  l3-drawinstanced
 l3-instanced-b  0xc52010   554889e5415741564155415453  l3-drawinstanced-b
 l3-material     0x13da590  554889e5415741564155415453  l3-bindmaterial
 count           0xc545f0   554889e5415741564155415453  l3-passjob
+# GPU-driven indirect draw cluster (medium confidence, bodies not compared): log arguments only for now.
+args            0x1257ee0  554889e5415741564155415453  l3-indirect-1257ee0
+args            0x1266b10  554889e5415741564155415453  l3-indirect-1266b10
+args            0x126cb10  554889e54157415641545348   l3-indirect-126cb10
+args            0x126ef00  554889e5415741564155415453  l3-indirect-126ef00
+args            0x1268630  554889e5415741564155415453  l3-indirect-1268630
+args            0x12696f0  554889e5415741564155415453  l3-indirect-12696f0
+args            0x126a780  554889e5415741564155415453  l3-indirect-126a780
+args            0x1579220  554889e5415741564155415453  l3-indirect-1579220
+# 0x157a3a0 starts with cmp dword [r8+8],0; je (not a plain prologue): not hooked
+#args           0x157a3a0  l3-indirect-157a3a0

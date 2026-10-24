@@ -1,16 +1,21 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include "prx/libc/include/GuestHooks.hpp"
+#include "prx/libc/include/general/AsmMacros.hpp"
 #endif
 
 namespace AgcDriver::EngineMarks {
@@ -23,6 +28,7 @@ struct Totals {
     // Written by the hook handlers (guest threads).
     Counters written{};
     Counters skipped{};
+    std::atomic<std::uint64_t> exitsUnmatched{0};
     // Written by the queue workers.
     Counters seen{};
     Counters firstDraws{};
@@ -30,6 +36,7 @@ struct Totals {
     Counters zeroDraw{};
     Counters oneDraw{};
     Counters manyDraws{};
+    Counters unterminated{};
     std::atomic<std::uint64_t> draws{0};
     std::atomic<std::uint64_t> outsideDirect{0};
     std::atomic<std::uint64_t> outsideIndirect{0};
@@ -37,7 +44,10 @@ struct Totals {
 
 Totals totals;
 
-const char* const KindNames[KindCount] = {"?", "item", "instanced", "instanced-b", "material"};
+const char* const KindNames[KindCount] = {"?", "item", "instanced", "instanced-b", "material", "item-end", "instanced-end", "instanced-b-end", "indirect", "indirect-end"};
+
+std::mutex foreignMutex;
+std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> foreignPrograms;
 
 std::uint64_t Load64(std::uint64_t address) {
     std::uint64_t value = 0;
@@ -46,8 +56,8 @@ std::uint64_t Load64(std::uint64_t address) {
 }
 
 #ifdef _WIN32
-void Emit(GuestHookContext& context, Kind kind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit) {
-    const auto ctx = context.rsi;
+// Writes a marker into the engine context's DCB; `technique` fills the first value.
+void Emit(std::uint64_t ctx, Kind kind, std::uint64_t technique, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit) {
     if (ctx == 0) {
         ++totals.skipped[kind];
         return;
@@ -62,7 +72,7 @@ void Emit(GuestHookContext& context, Kind kind, std::uint64_t a, std::uint64_t b
     }
     cursor[0] = (3u << 30u) | ((MarkerDwords - 2u) << 16u) | (0x10u << 8u);
     cursor[1] = MarkerMagic | kind;
-    const std::uint64_t values[4] = {context.rdi, a, b, c};
+    const std::uint64_t values[4] = {technique, a, b, c};
     std::memcpy(cursor + 2, values, sizeof(values));
     cursor[10] = static_cast<std::uint32_t>(hit);
     const auto next = reinterpret_cast<std::uint64_t>(cursor + MarkerDwords);
@@ -70,31 +80,96 @@ void Emit(GuestHookContext& context, Kind kind, std::uint64_t a, std::uint64_t b
     ++totals.written[kind];
 }
 
+// Return-through-stub bookkeeping: each hooked draw call pushes its real return address and context here
+// and returns into L3ExitStub, which calls Exit() and jumps to the real return address.
+struct OpenCall {
+    std::uint64_t returnAddress;
+    std::uint64_t ctx;
+    std::uint64_t technique;
+    std::uint64_t hit;
+    Kind endKind;
+};
+
+thread_local std::vector<OpenCall> openCalls;
+
+extern "C" void L3ExitStub_nid_no_patch();
+
+void Enter(GuestHookContext& context, Kind kind, Kind endKind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit) {
+    Emit(context.rsi, kind, context.rdi, a, b, c, hit);
+    openCalls.push_back({context.returnAddress, context.rsi, context.rdi, hit, endKind});
+    context.returnAddress = reinterpret_cast<std::uint64_t>(&L3ExitStub_nid_no_patch);
+}
+
 // DrawItem(technique, ctx, item): item+0x18 points at {geometry, material}.
 void ItemHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
     const auto item = context.rdx;
     const auto part = item != 0 ? Load64(item + 0x18) : 0;
-    Emit(context, Item, item, part != 0 ? Load64(part) : 0, part != 0 ? Load64(part + 8) : 0, hit);
+    Enter(context, Item, ItemEnd, item, part != 0 ? Load64(part) : 0, part != 0 ? Load64(part + 8) : 0, hit);
 }
 
 // DrawInstanced(technique, ctx, instances, geometry, part, flags).
 void InstancedHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
-    Emit(context, Instanced, context.rdx, context.rcx, context.r8, hit);
+    Enter(context, Instanced, InstancedEnd, context.rdx, context.rcx, context.r8, hit);
 }
 
 void InstancedBHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
-    Emit(context, InstancedB, context.rdx, context.rcx, context.r8, hit);
+    Enter(context, InstancedB, InstancedBEnd, context.rdx, context.rcx, context.r8, hit);
 }
 
-// BindMaterial(technique, ctx, material, binding record).
-void MaterialHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
-    Emit(context, Material, context.rdx, context.rcx, 0, hit);
+// GPU-driven indirect draw wrappers: the second argument is assumed to be the context, as for the others.
+void IndirectHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
+    Enter(context, Indirect, IndirectEnd, context.rdx, context.rcx, context.r8, hit);
 }
+
+// BindMaterial(technique, ctx, material, binding record): begin marker only.
+void MaterialHandler(GuestHookContext& context, const GuestHookInfo&, std::uint64_t hit) {
+    Emit(context.rsi, Material, context.rdi, context.rdx, context.rcx, 0, hit);
+}
+
+}
+
+// Called by L3ExitStub on the guest thread after the hooked function returned; returns the real return address.
+extern "C" std::uint64_t L3Exit_nid_no_patch() {
+    if (openCalls.empty()) {
+        ++totals.exitsUnmatched;
+        std::fputs("[l3] exit stub without an open call: cannot continue\n", stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+    const auto call = openCalls.back();
+    openCalls.pop_back();
+    Emit(call.ctx, call.endKind, call.technique, 0, 0, 0, call.hit);
+    return call.returnAddress;
+}
+
+// Entered by `ret` from the hooked function, so rsp is 16-byte aligned and the return values are live.
+// Preserves rax, rdx, xmm0 and xmm1 (SysV return registers); the callee-saved registers survive the MS-ABI
+// call to L3Exit on their own.
+asm(".text\n"
+    APS5_ASM_FUNCTION("L3ExitStub_nid_no_patch")
+    "    push %rax\n"
+    "    push %rdx\n"
+    "    push %rcx\n"
+    "    sub $72, %rsp\n"
+    "    vmovdqu %xmm0, 0(%rsp)\n"
+    "    vmovdqu %xmm1, 16(%rsp)\n"
+    "    call L3Exit_nid_no_patch\n"
+    "    mov %rax, %r11\n"
+    "    vmovdqu 0(%rsp), %xmm0\n"
+    "    vmovdqu 16(%rsp), %xmm1\n"
+    "    add $72, %rsp\n"
+    "    pop %rcx\n"
+    "    pop %rdx\n"
+    "    pop %rax\n"
+    "    jmp *%r11\n");
+
+namespace {
 #endif
 
-std::string Row(const char* name, const Counters& counters, std::array<std::uint64_t, KindCount>& last) {
+std::string Row(const char* name, const Counters& counters, std::array<std::uint64_t, KindCount>& last, bool endsToo) {
     std::string text = std::string(" ") + name;
     for (std::uint32_t kind = 1; kind < KindCount; ++kind) {
+        if (!endsToo && (kind == ItemEnd || kind == InstancedEnd || kind == InstancedBEnd || kind == IndirectEnd)) continue;
         const auto value = counters[kind].load(std::memory_order_relaxed);
         text += " " + std::string(KindNames[kind]) + "=" + std::to_string(value - last[kind]);
         last[kind] = value;
@@ -103,26 +178,45 @@ std::string Row(const char* name, const Counters& counters, std::array<std::uint
 }
 
 void Reporter() {
-    std::array<std::array<std::uint64_t, KindCount>, 8> last{};
-    std::uint64_t lastDraws = 0, lastDirect = 0, lastIndirect = 0;
+    std::array<std::array<std::uint64_t, KindCount>, 9> last{};
+    std::uint64_t lastDraws = 0, lastDirect = 0, lastIndirect = 0, lastUnmatched = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         const auto draws = totals.draws.load(std::memory_order_relaxed);
         const auto direct = totals.outsideDirect.load(std::memory_order_relaxed);
         const auto indirect = totals.outsideIndirect.load(std::memory_order_relaxed);
-        std::string text = "[l3] (10 s): draws " + std::to_string(draws - lastDraws) + ", outside markers " + std::to_string(direct - lastDirect) + " direct + " + std::to_string(indirect - lastIndirect) + " indirect;";
+        const auto unmatched = totals.exitsUnmatched.load(std::memory_order_relaxed);
+        std::string text = "[l3] (10 s): draws " + std::to_string(draws - lastDraws) + ", foreign " + std::to_string(direct - lastDirect) + " direct + " + std::to_string(indirect - lastIndirect) + " indirect, unmatched exits " + std::to_string(unmatched - lastUnmatched) + ";";
         lastDraws = draws;
         lastDirect = direct;
         lastIndirect = indirect;
-        text += Row("written", totals.written, last[0]);
-        text += Row("skipped", totals.skipped, last[1]);
-        text += Row("seen", totals.seen, last[2]);
-        text += Row("first-draws", totals.firstDraws, last[3]);
-        text += Row("extra-draws", totals.extraDraws, last[4]);
-        text += Row("markers-0-draws", totals.zeroDraw, last[5]);
-        text += Row("markers-1-draw", totals.oneDraw, last[6]);
-        text += Row("markers-2+-draws", totals.manyDraws, last[7]);
+        lastUnmatched = unmatched;
+        text += Row("written", totals.written, last[0], true);
+        text += Row("skipped", totals.skipped, last[1], true);
+        text += Row("seen", totals.seen, last[2], true);
+        text += Row("first-draws", totals.firstDraws, last[3], false);
+        text += Row("extra-draws", totals.extraDraws, last[4], false);
+        text += Row("calls-0-draws", totals.zeroDraw, last[5], false);
+        text += Row("calls-1-draw", totals.oneDraw, last[6], false);
+        text += Row("calls-2+-draws", totals.manyDraws, last[7], false);
+        text += Row("unterminated", totals.unterminated, last[8], false);
         text += "\n";
+        std::vector<std::pair<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>>> hot;
+        {
+            std::lock_guard lock(foreignMutex);
+            for (const auto& [key, count] : foreignPrograms) hot.emplace_back(count, key);
+            foreignPrograms.clear();
+        }
+        if (!hot.empty()) {
+            std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            text += "[l3-foreign] (10 s) draws by program set (first/last):";
+            char item[80];
+            for (std::size_t index = 0; index < std::min<std::size_t>(hot.size(), 24); ++index) {
+                std::snprintf(item, sizeof(item), " 0x%llx/0x%llx %llu;", static_cast<unsigned long long>(hot[index].second.first), static_cast<unsigned long long>(hot[index].second.second), static_cast<unsigned long long>(hot[index].first));
+                text += item;
+            }
+            text += " (" + std::to_string(hot.size()) + " sets)\n";
+        }
         std::fputs(text.c_str(), stderr);
         std::fflush(stderr);
     }
@@ -134,28 +228,31 @@ const bool enabled = [] {
     RegisterGuestHookHandler_nid_no_patch("l3-item", &ItemHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-instanced", &InstancedHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-instanced-b", &InstancedBHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-indirect", &IndirectHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-material", &MaterialHandler);
 #endif
     std::thread(Reporter).detach();
     return true;
 }();
 
-// One queue worker thread processes a submission at a time; markers never span submissions.
+// One queue worker thread processes a submission at a time; open calls never span submissions.
 struct WorkerState {
     std::uint32_t queue = 0xffffffffu;
     std::uint64_t serial = 0;
-    Kind pending = Kind(0);
-    std::uint64_t drawsAfter = 0;
+    Kind open = Kind(0);
+    std::uint64_t drawsInside = 0;
+    bool lastDrawForeign = false;
 };
 
 thread_local WorkerState worker;
 
-void Finish() {
-    if (worker.pending == 0) return;
-    auto& row = worker.drawsAfter == 0 ? totals.zeroDraw : worker.drawsAfter == 1 ? totals.oneDraw : totals.manyDraws;
-    ++row[worker.pending];
-    worker.pending = Kind(0);
-    worker.drawsAfter = 0;
+void Close(bool terminated) {
+    if (worker.open == 0) return;
+    auto& row = worker.drawsInside == 0 ? totals.zeroDraw : worker.drawsInside == 1 ? totals.oneDraw : totals.manyDraws;
+    ++row[worker.open];
+    if (!terminated) ++totals.unterminated[worker.open];
+    worker.open = Kind(0);
+    worker.drawsInside = 0;
 }
 
 }
@@ -171,7 +268,7 @@ bool IsMarker(std::span<const std::uint32_t> packet) {
 void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t, std::uint32_t opcode, std::span<const std::uint32_t> packet) {
     if (!enabled) return;
     if (worker.queue != queue || worker.serial != serial) {
-        Finish();
+        Close(false);
         worker.queue = queue;
         worker.serial = serial;
     }
@@ -179,18 +276,29 @@ void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t, std::uint32_
         const auto kind = static_cast<Kind>(packet[1] & 0xffffu);
         ++totals.seen[kind];
         if (kind == Material) return;
-        Finish();
-        worker.pending = kind;
+        if (kind == ItemEnd || kind == InstancedEnd || kind == InstancedBEnd || kind == IndirectEnd) {
+            Close(true);
+            return;
+        }
+        Close(false);
+        worker.open = kind;
         return;
     }
     if (!Pm4::DrawOpcode(opcode)) return;
     ++totals.draws;
-    if (worker.pending == 0) {
+    worker.lastDrawForeign = worker.open == 0;
+    if (worker.open == 0) {
         ++(Pm4::IndirectDrawOpcode(opcode) ? totals.outsideIndirect : totals.outsideDirect);
         return;
     }
-    ++(worker.drawsAfter == 0 ? totals.firstDraws : totals.extraDraws)[worker.pending];
-    ++worker.drawsAfter;
+    ++(worker.drawsInside == 0 ? totals.firstDraws : totals.extraDraws)[worker.open];
+    ++worker.drawsInside;
+}
+
+void NoteDrawPrograms(std::uint64_t first, std::uint64_t last) {
+    if (!enabled || !worker.lastDrawForeign) return;
+    std::lock_guard lock(foreignMutex);
+    ++foreignPrograms[{first, last}];
 }
 
 }
