@@ -68,18 +68,20 @@ def main():
     subprocess.run([sys.executable, "-I", os.path.join(HERE, "elem_spec.py"), "--run", "el2", "--out", spec_path], check=True)
     spec = json.load(open(spec_path, encoding="utf-8"))
     texts = json.load(open(os.path.join(HERE, "elem_texts.json"), encoding="utf-8"))
-    el3, el5, el6 = plan("el3"), plan("el5"), plan("el6")
-    configs = []
-    for run, label, name, plain in texts["configs"]:
-        steps_for = {"el3": el3, "el5": el5, "el6": el6}[run]
-        card = config_card(run, steps_for, label, name, plain)
-        if card:
-            configs.append(card)
+    runs = {name: plan(name) for name in ("el3", "el5", "el6", "el7", "el9", "el10", "el11")}
+    config_sections = []
+    for section in texts["config_sections"]:
+        cards = []
+        for run, label, name, plain in section["cards"]:
+            card = config_card(run, runs.get(run, []), label, name, plain)
+            if card:
+                cards.append(card)
+        config_sections.append({"id": section["id"], "title": section["title"], "intro": section["intro"], "cards": cards})
     for key in ("title", "subtitle", "summary", "facts", "glossary", "footer", "breakdown", "breakdown_title", "breakdown_note", "breakdown_total_ms", "group_names"):
         if key in texts:
             spec[key] = texts[key]
     sections = []
-    sections.append({"id": "best", "title": texts["best_title"], "intro": texts["best_intro"], "cards": configs})
+    sections.extend(config_sections)
     sections.append({"id": "why", "title": "Why the game is slow here", "intro": texts["why_intro"], "paragraphs": texts["why"]})
     sections.extend(spec["sections"])
     sections.append({"id": "causes", "title": "Root causes, one by one", "intro": texts["causes_intro"], "table": texts["causes_table"]})
