@@ -4,6 +4,7 @@
 #include "ThreadOwned.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
@@ -433,6 +434,7 @@ void Driver::execute(const Submission& submission) {
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         const auto opcode = (header >> 8u) & 0xffu;
         auto nextCursor = cursor + count;
+        if (EngineMarks::Enabled()) EngineMarks::Note(submission.queue, submission.serial, header, opcode, packet);
         if (dispatchGapsEnabled()) noteDispatchGap(submission.queue, submission.serial, opcode, packet);
         if (ringOverlap) noteRingPacket(submission.queue, submission.serial, opcode, header);
         const bool predicated = Pm4::Predicated(header) && queue.predication.operation != 0;

@@ -1,0 +1,9 @@
+# L3 probe 2 (2026-10-24): the driver's l3-* handlers (APS5_PORTER_L3=1, Execution/src/Driver/EngineMarks.cpp)
+# write a NOP marker into the engine context's command buffer before each engine draw and material bind; the
+# driver attributes the following draw packets to it and prints "[l3]" lines every 10 s.
+# Load with APS5_GUEST_HOOKS=<this file> and APS5_PORTER_L3=1.
+l3-item         0xc53710   554889e5415741564155415453  l3-drawitem
+l3-instanced    0xc51d40   554889e5415741564155415453  l3-drawinstanced
+l3-instanced-b  0xc52010   554889e5415741564155415453  l3-drawinstanced-b
+l3-material     0x13da590  554889e5415741564155415453  l3-bindmaterial
+count           0xc545f0   554889e5415741564155415453  l3-passjob
