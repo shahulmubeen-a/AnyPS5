@@ -62,6 +62,10 @@ private:
 // The worker phases of the current packet (APS5_PROFILE_DRAW: DispatchTiming.hpp DriverPhase, DrawTiming.hpp
 // DrawDriverPhase), charged to its label and program.
 void NotePhases(bool dispatch, const double* ms, std::size_t count);
+// The committer's phases of one recorded draw (Graphics Draw.cpp DrawPhase, microseconds), charged to the element
+// of the draw-pipeline item being committed (SetCommitTag on the committer thread).
+void SetCommitTag(const Tag* tag);
+void NoteCommitPhases(const double* us, std::size_t count);
 // From Driver::draw after the programs are decoded (queue worker thread).
 void NoteDrawPrograms(std::uint64_t first, std::uint64_t last);
 bool SkipDrawPrograms(std::uint64_t first, std::uint64_t last);

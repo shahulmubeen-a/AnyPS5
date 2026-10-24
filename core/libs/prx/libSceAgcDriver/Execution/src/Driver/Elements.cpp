@@ -99,14 +99,20 @@ Table<ProgramSlots>& Programs() { static auto* table = new Table<ProgramSlots>()
 
 // Worker phases (APS5_PROFILE_DRAW) per label and per program: dispatch phases at [0, DriverPhaseCount), draw
 // phases after them.
-constexpr std::size_t PhaseColumns = DriverPhaseCount + DrawDriverPhaseCount;
+constexpr std::size_t CommitPhaseCount = 13;
+constexpr const char* CommitPhaseNames[CommitPhaseCount] = {"commit: validate", "commit: vertex", "commit: setup", "commit: readTarget", "commit: prepare", "commit: lookup", "commit: resources", "commit: pipeline", "commit: record", "commit: keep", "commit: sync", "commit: writeBack", "commit: describe"};
+constexpr std::size_t PhaseColumns = DriverPhaseCount + DrawDriverPhaseCount + CommitPhaseCount;
 using PhaseRow = std::array<std::atomic<std::uint64_t>, PhaseColumns>;
 std::vector<PhaseRow>& LabelPhases() { static auto* rows = new std::vector<PhaseRow>(LabelSlots); return *rows; }
 std::vector<PhaseRow>& ProgramPhases() { static auto* rows = new std::vector<PhaseRow>(ProgramSlots); return *rows; }
 
 const char* PhaseName(std::size_t column) {
-    return column < DriverPhaseCount ? DriverPhaseNames[column] : DrawDriverPhaseNames[column - DriverPhaseCount];
+    if (column < DriverPhaseCount) return DriverPhaseNames[column];
+    if (column < DriverPhaseCount + DrawDriverPhaseCount) return DrawDriverPhaseNames[column - DriverPhaseCount];
+    return CommitPhaseNames[column - DriverPhaseCount - DrawDriverPhaseCount];
 }
+
+thread_local const Tag* committing = nullptr;
 
 // Label strings: the key of a label entry is a 64-bit hash of its text; the text is kept here for the report.
 std::mutex textMutex;
@@ -392,6 +398,23 @@ void NotePhases(bool dispatch, const double* ms, std::size_t count) {
     for (std::size_t index = 0; index < std::min(count, limit); ++index) {
         if (ms[index] <= 0) continue;
         const auto ns = static_cast<std::uint64_t>(ms[index] * 1e6);
+        if (label != nullptr) (*label)[base + index].fetch_add(ns, std::memory_order_relaxed);
+        if (program != nullptr) (*program)[base + index].fetch_add(ns, std::memory_order_relaxed);
+    }
+}
+
+void SetCommitTag(const Tag* tag) {
+    committing = tag;
+}
+
+void NoteCommitPhases(const double* us, std::size_t count) {
+    if (!enabled || us == nullptr || committing == nullptr) return;
+    const std::size_t base = DriverPhaseCount + DrawDriverPhaseCount;
+    PhaseRow* label = committing->label < LabelSlots ? &LabelPhases()[committing->label] : nullptr;
+    PhaseRow* program = committing->programSlot < ProgramSlots ? &ProgramPhases()[committing->programSlot] : nullptr;
+    for (std::size_t index = 0; index < std::min(count, CommitPhaseCount); ++index) {
+        if (us[index] <= 0) continue;
+        const auto ns = static_cast<std::uint64_t>(us[index] * 1e3);
         if (label != nullptr) (*label)[base + index].fetch_add(ns, std::memory_order_relaxed);
         if (program != nullptr) (*program)[base + index].fetch_add(ns, std::memory_order_relaxed);
     }

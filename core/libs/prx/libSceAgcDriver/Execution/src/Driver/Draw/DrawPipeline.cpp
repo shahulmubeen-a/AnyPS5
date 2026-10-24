@@ -560,6 +560,10 @@ void DrawPipeline::run() {
         bool failed = false;
         bool shutdown = false;
         try {
+            struct CommitTagScope {
+                explicit CommitTagScope(const Elements::Tag* tag) { Elements::SetCommitTag(tag); }
+                ~CommitTagScope() { Elements::SetCommitTag(nullptr); }
+            } commitTag{&element};
             if (commit != nullptr) (*commit)();
             if (!isDraw) GuestMemory::BreakProofs();
         } catch (const std::exception& error) {
