@@ -24,6 +24,7 @@
 //   queue <hex>   skip every draw and dispatch on this queue
 //   gkind/gva/gmat ...  the same at the guest: the engine function returns at once, so the title never
 //                 writes the packets (porter L3 hooks only)
+//   lockprio on|off  queue 0's worker and the draw committer take GpuMutex first (APS5_GPU_LOCK_PRIORITY, live)
 // '#' starts a comment. Skipped packets are counted per element.
 namespace AgcDriver {
 struct QueueState;

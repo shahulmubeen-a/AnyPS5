@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <algorithm>
@@ -139,6 +140,7 @@ struct Rules {
     std::vector<std::uint32_t> kinds, gkinds, queues;
     bool any = false;
     bool guest = false;
+    int lockPriority = -1;
 };
 
 std::atomic<const Rules*> rules{nullptr};
@@ -190,11 +192,13 @@ void Reload(const char* path) {
         else if (verb == "gkind") next->gkinds.push_back(KindNumber(rest));
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
+        else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
         else --count;
     }
     next->any = count != 0;
     next->guest = !next->gkinds.empty() || !next->gvas.empty() || !next->gmaterials.empty();
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
+    GuestMemory::SetGpuLockPriority(next->lockPriority);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
     std::fflush(stderr);
 }

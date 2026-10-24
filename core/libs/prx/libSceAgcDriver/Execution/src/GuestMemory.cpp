@@ -2474,9 +2474,13 @@ std::string WaitedBehindReport(const HolderMatrixValues& waited) {
 namespace {
 std::atomic<std::uint64_t> gpuHoldSerial{0};
 
+// -1: follow APS5_GPU_LOCK_PRIORITY; 0/1: set live (porter element rules, "lockprio on|off").
+std::atomic<int> gpuLockPriorityLive{-1};
+
 bool GpuLockPriorityEnabled() {
     static const bool enabled = std::getenv("APS5_GPU_LOCK_PRIORITY") != nullptr;
-    return enabled;
+    const auto live = gpuLockPriorityLive.load(std::memory_order_relaxed);
+    return live < 0 ? enabled : live != 0;
 }
 
 thread_local bool gpuLockPriority = false;
@@ -2509,6 +2513,10 @@ struct GpuLockPriorityGate {
 
 void MarkGpuLockPriorityThread() {
     gpuLockPriority = true;
+}
+
+void SetGpuLockPriority(int value) {
+    gpuLockPriorityLive.store(value, std::memory_order_relaxed);
 }
 
 void GpuMutexType::enter() {

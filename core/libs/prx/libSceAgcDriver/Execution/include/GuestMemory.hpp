@@ -226,6 +226,8 @@ void MarkPresenterThread();
 // so while one of them waits for GpuMutex another thread's lock() or try_lock() stands back until it got
 // through. Called once on each such thread; without the switch it has no effect.
 void MarkGpuLockPriorityThread();
+// Overrides APS5_GPU_LOCK_PRIORITY at run time: 1 on, 0 off, -1 back to the switch.
+void SetGpuLockPriority(int value);
 // The queue tag of the calling thread (0xffffffff when untagged), for reports that name the thread.
 std::uint32_t GpuLockThreadTag();
 // Lock sites (APS5_PROFILE_DRAW): a caller names the site of its next lock() so the [lock] line
