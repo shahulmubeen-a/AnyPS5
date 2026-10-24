@@ -55,3 +55,17 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   clipmap/deformation updates): **5.58 fps** (base in the same run 1.84-2.04), image: ground ok, sky area garbage.
 - Runtime switches on lean-c: pipeline dispatch misses +14%, quiet publish ~+9%, defer flip store ~+2%,
   draw-ahead 0%, draw inputs in place ~+2% (noise ~5%).
+
+## Recognizable configurations (el6-el9)
+- Cuts that break the picture: post-processing children (SSGI, tone mapping chain), the depth pre-pass (the G-buffer
+  draws test EQUAL against it, so most objects vanish), and something in the misc set (dark fog: probably
+  "Composite depth bias"); the lean extras (Vcull, proxy streams, CS lights, cloth, terrain generation, compute
+  meshes, displacement) give most of the speed but garble geometry and lighting.
+- Picture intact: r0 = shadows + particles + async extras (+ the two switches) = 3.08 fps (el9), c3 = 2.9 fps (el3).
+- Broken but >= 5 fps: lean-b 5.58 (el5), l2-sw-c1 5.53, l2-safe-post 5.25 (el6).
+- Engine knobs on the full game (el9): shadow distance 5000 0%, cascades 2 0%, cascades 1 + distance 2500 +5-9%.
+- el7: pipeline depth 256 + preparer look-ahead 64 = -17% (worse); Vcull +17%, cloth +13% on top of b0.
+- Research agents: dispatch misses cost 156 us each on the worker, 85 us of it the drain; a cache hit would save
+  <= 15 us, enqueuing (miss items) removes the 85 us (yotei-work/porter/research-dispatch-misses.md). Committer GPU
+  waits come from StorageTexture::FlushPending, StoreReadbackBeforeLabel, depth-plane syncs; proposal P1/P2 in
+  yotei-work/porter/research-committer-syncs.md.
