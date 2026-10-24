@@ -22,10 +22,12 @@ l3-other        0x13db610  554889e5415741564155415453  l3-other-13db610
 l3-other        0x1268630  554889e5415741564155415453  l3-other-1268630
 l3-other        0x1579220  554889e5415741564155415453  l3-other-1579220
 l3-other        0x1257ee0  554889e5415741564155415453  l3-other-1257ee0
-# Low-rate sites whose context argument is not confirmed: counted only.
-count           0x1266b10  554889e5415741564155415453  l3-count-1266b10
-count           0x159acb0  554889e5415741564155415453  l3-count-159acb0
-count           0x1577dd0  554889e5415741564155415453  l3-count-1577dd0
-count           0x15786f0  554889e5415741564155415453  l3-count-15786f0
-count           0x13dbec0  554889e54157415641545348    l3-count-13dbec0
-count           0x126cb10  554889e54157415641545348    l3-count-126cb10
+# Low-rate indirect-draw functions, confirmed from their decompiles (yotei-work/porter/out/dec-yotei-foreign3.c):
+# the context is the first argument (0x159acb0), the third (0x1577dd0, 0x15786f0), the second (0x13dbec0) or
+# the pointer the second argument points at (0x1266b10, 0x126cb10).
+l3-other-rsi-deref 0x1266b10  554889e5415741564155415453  l3-other-1266b10
+l3-other-rdi    0x159acb0  554889e5415741564155415453  l3-other-159acb0
+l3-other-rdx    0x1577dd0  554889e5415741564155415453  l3-other-1577dd0
+l3-other-rdx    0x15786f0  554889e5415741564155415453  l3-other-15786f0
+l3-other        0x13dbec0  554889e54157415641545348    l3-other-13dbec0
+l3-other-rsi-deref 0x126cb10  554889e54157415641545348    l3-other-126cb10

@@ -173,10 +173,14 @@ thread_local std::vector<OpenCall> openCalls;
 
 extern "C" void L3ExitStub_nid_no_patch();
 
-void Enter(GuestHookContext& context, Kind kind, Kind endKind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit) {
-    Emit(context.rsi, kind, context.rdi, a, b, c, hit);
-    openCalls.push_back({context.returnAddress, context.rsi, context.rdi, hit, endKind});
+void Enter(GuestHookContext& context, Kind kind, Kind endKind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit, std::uint64_t ctx) {
+    Emit(ctx, kind, context.rdi, a, b, c, hit);
+    openCalls.push_back({context.returnAddress, ctx, context.rdi, hit, endKind});
     context.returnAddress = reinterpret_cast<std::uint64_t>(&L3ExitStub_nid_no_patch);
+}
+
+void Enter(GuestHookContext& context, Kind kind, Kind endKind, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t hit) {
+    Enter(context, kind, endKind, a, b, c, hit, context.rsi);
 }
 
 // DrawItem(technique, ctx, item): item+0x18 points at {geometry, material}.
@@ -203,6 +207,21 @@ void IndirectHandler(GuestHookContext& context, const GuestHookInfo&, std::uint6
 // Any other engine draw function whose second argument is the context (checked in the decompiled body).
 void OtherHandler(GuestHookContext& context, const GuestHookInfo& info, std::uint64_t hit) {
     Enter(context, Other, OtherEnd, info.va, context.rdx, context.rcx, hit);
+}
+
+// The low-rate indirect-draw functions (decompiled in yotei-work/porter/out/dec-yotei-foreign3.c): the context is
+// the first argument (0x159acb0), the third (0x1577dd0, 0x15786f0) or the pointer the second argument points at
+// (0x1266b10, 0x126cb10: `ctx = *param_2`).
+void OtherRdiHandler(GuestHookContext& context, const GuestHookInfo& info, std::uint64_t hit) {
+    Enter(context, Other, OtherEnd, info.va, context.rsi, context.rdx, hit, context.rdi);
+}
+
+void OtherRdxHandler(GuestHookContext& context, const GuestHookInfo& info, std::uint64_t hit) {
+    Enter(context, Other, OtherEnd, info.va, context.rsi, context.rcx, hit, context.rdx);
+}
+
+void OtherRsiDerefHandler(GuestHookContext& context, const GuestHookInfo& info, std::uint64_t hit) {
+    Enter(context, Other, OtherEnd, info.va, context.rsi, context.rdx, hit, context.rsi != 0 ? Load64(context.rsi) : 0);
 }
 
 // BindMaterial(technique, ctx, material, binding record): begin marker only.
@@ -379,6 +398,9 @@ const bool enabled = [] {
     RegisterGuestHookHandler_nid_no_patch("l3-indirect", &IndirectHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-material", &MaterialHandler);
     RegisterGuestHookHandler_nid_no_patch("l3-other", &OtherHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-other-rdi", &OtherRdiHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-other-rdx", &OtherRdxHandler);
+    RegisterGuestHookHandler_nid_no_patch("l3-other-rsi-deref", &OtherRsiDerefHandler);
 #endif
     std::thread(Reporter).detach();
     return true;
