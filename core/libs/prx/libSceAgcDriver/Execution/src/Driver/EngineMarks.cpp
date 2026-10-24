@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #ifdef _WIN32
@@ -60,6 +61,38 @@ struct OtherStats {
 
 std::mutex otherMutex;
 std::map<std::uint64_t, OtherStats> otherStats;
+
+// Probe 6: per engine draw key (technique, geometry, material or part), the packet stream between begin and
+// end, compared with the previous call on the same key.
+struct StreamRecord {
+    std::uint64_t hash = 0;
+    std::vector<std::uint32_t> dwords;
+    std::vector<std::uint32_t> packetOffsets;
+};
+
+struct StreamTotals {
+    std::uint64_t newKeys = 0;
+    std::uint64_t repeatsSame = 0;
+    std::uint64_t repeatsDiffer = 0;
+    std::uint64_t repeatsDifferentShape = 0;
+    std::uint64_t dwords = 0;
+    std::uint64_t dwordsDiffering = 0;
+    std::map<std::uint32_t, std::pair<std::uint64_t, std::uint64_t>> packetsByOpcode;  // compared, differing
+    std::map<std::uint32_t, std::uint64_t> differingRegisters;                           // register offset -> count
+};
+
+std::mutex streamMutex;
+std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, StreamRecord> streams;
+StreamTotals streamTotals;
+
+std::uint64_t Fnv(const std::vector<std::uint32_t>& dwords) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto dword : dwords) {
+        hash ^= dword;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
 
 std::mutex foreignMutex;
 std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> foreignPrograms;
@@ -289,6 +322,29 @@ void Reporter() {
             }
             text += "\n";
         }
+        {
+            std::lock_guard lock(streamMutex);
+            auto& t = streamTotals;
+            const auto repeats = t.repeatsSame + t.repeatsDiffer + t.repeatsDifferentShape;
+            if (repeats + t.newKeys > 0) {
+                text += "[l3-stream] (10 s) packet streams per engine draw key: new keys " + std::to_string(t.newKeys) + ", repeats identical " + std::to_string(t.repeatsSame) + ", differing " + std::to_string(t.repeatsDiffer) + ", different shape " + std::to_string(t.repeatsDifferentShape) + "; dwords per stream " + std::to_string(repeats + t.newKeys > 0 ? t.dwords / (repeats + t.newKeys) : 0) + ", differing dwords " + std::to_string(t.dwordsDiffering) + " of " + std::to_string(t.dwords) + "; packets compared/differing by opcode:";
+                char item[96];
+                for (const auto& [opcode, counts] : t.packetsByOpcode) {
+                    std::snprintf(item, sizeof(item), " %02x %llu/%llu;", opcode, static_cast<unsigned long long>(counts.first), static_cast<unsigned long long>(counts.second));
+                    text += item;
+                }
+                std::vector<std::pair<std::uint64_t, std::uint32_t>> regs;
+                for (const auto& [reg, count] : t.differingRegisters) regs.emplace_back(count, reg);
+                std::sort(regs.begin(), regs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                text += " differing registers (offset count):";
+                for (std::size_t index = 0; index < std::min<std::size_t>(regs.size(), 32); ++index) {
+                    std::snprintf(item, sizeof(item), " %x %llu;", regs[index].second, static_cast<unsigned long long>(regs[index].first));
+                    text += item;
+                }
+                text += " (" + std::to_string(regs.size()) + " registers, " + std::to_string(streams.size()) + " keys held)\n";
+                t = {};
+            }
+        }
         std::fputs(text.c_str(), stderr);
         std::fflush(stderr);
     }
@@ -316,12 +372,54 @@ struct WorkerState {
     std::uint64_t openVa = 0;
     std::uint64_t drawsInside = 0;
     bool lastDrawForeign = false;
+    std::tuple<std::uint64_t, std::uint64_t, std::uint64_t> key{};
+    std::vector<std::uint32_t> stream;
+    std::vector<std::uint32_t> packetOffsets;
 };
 
 thread_local WorkerState worker;
 
+// Compares the closed call's packet stream with the previous call on the same key and records the differences.
+void CompareStream() {
+    std::lock_guard lock(streamMutex);
+    auto& t = streamTotals;
+    t.dwords += worker.stream.size();
+    auto& record = streams[worker.key];
+    const auto hash = Fnv(worker.stream);
+    if (record.dwords.empty() && record.hash == 0) {
+        ++t.newKeys;
+    } else if (hash == record.hash && record.dwords == worker.stream) {
+        ++t.repeatsSame;
+    } else if (record.packetOffsets != worker.packetOffsets) {
+        ++t.repeatsDifferentShape;
+    } else {
+        ++t.repeatsDiffer;
+        for (std::size_t p = 0; p < worker.packetOffsets.size(); ++p) {
+            const auto start = worker.packetOffsets[p];
+            const auto stop = p + 1 < worker.packetOffsets.size() ? worker.packetOffsets[p + 1] : static_cast<std::uint32_t>(worker.stream.size());
+            const auto opcode = (worker.stream[start] >> 8u) & 0xffu;
+            auto& counts = t.packetsByOpcode[opcode];
+            ++counts.first;
+            bool differs = false;
+            for (auto i = start; i < stop; ++i) {
+                if (worker.stream[i] == record.dwords[i]) continue;
+                differs = true;
+                ++t.dwordsDiffering;
+                if ((opcode == 0x69 || opcode == 0x76 || opcode == 0x79 || opcode == 0x7a) && i >= start + 2) ++t.differingRegisters[(worker.stream[start + 1] & 0xffffu) + (i - start - 2)];
+            }
+            if (differs) ++counts.second;
+        }
+    }
+    record.hash = hash;
+    record.dwords = worker.stream;
+    record.packetOffsets = worker.packetOffsets;
+}
+
 void Close(bool terminated) {
     if (worker.open == 0) return;
+    if (terminated && (worker.open == Item || worker.open == Instanced) && !worker.stream.empty()) CompareStream();
+    worker.stream.clear();
+    worker.packetOffsets.clear();
     auto& row = worker.drawsInside == 0 ? totals.zeroDraw : worker.drawsInside == 1 ? totals.oneDraw : totals.manyDraws;
     ++row[worker.open];
     if (!terminated) ++totals.unterminated[worker.open];
@@ -365,7 +463,17 @@ void Note(std::uint32_t queue, std::uint64_t serial, std::uint32_t, std::uint32_
         Close(false);
         worker.open = kind;
         if (kind == Other) std::memcpy(&worker.openVa, &packet[4], sizeof(worker.openVa));
+        if (kind == Item || kind == Instanced) {
+            // Item: values = technique, item, geometry, material. Instanced: technique, instances, geometry, part.
+            std::uint64_t values[4];
+            std::memcpy(values, &packet[2], sizeof(values));
+            worker.key = {values[0], values[2], values[3]};
+        }
         return;
+    }
+    if (worker.open == Item || worker.open == Instanced) {
+        worker.packetOffsets.push_back(static_cast<std::uint32_t>(worker.stream.size()));
+        worker.stream.insert(worker.stream.end(), packet.begin(), packet.end());
     }
     if (!Pm4::DrawOpcode(opcode)) return;
     ++totals.draws;
