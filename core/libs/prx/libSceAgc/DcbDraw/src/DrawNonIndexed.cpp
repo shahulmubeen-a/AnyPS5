@@ -6,10 +6,12 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 
 extern "C" {
 
 std::uint32_t* APS5_VABI sceAgcDcbDrawIndirect(CommandBuffer* buf, std::uint32_t dataOffsetInBytes, std::uint64_t modifier) {
+    L3NoteGuestDraw_nid_no_patch(__builtin_return_address(0));
     Agc::Command::Require((dataOffsetInBytes & 3u) == 0, __func__, "misaligned indirect argument offset");
     const auto offsets = Agc::Command::DrawPatchOffsets(modifier, __func__);
     return Agc::Command::Emit(buf, 0x24u, {dataOffsetInBytes, static_cast<std::uint32_t>(offsets), static_cast<std::uint32_t>(offsets >> 32u), Agc::Command::DrawInitiator(modifier, false, __func__)}, __func__);
@@ -20,6 +22,7 @@ std::uint32_t APS5_VABI sceAgcDcbDrawIndirectGetSize() {
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbDrawIndirectMulti(CommandBuffer* buf, std::uint32_t dataOffsetInBytes, std::uint32_t countIndirect, std::uint32_t maxCountOrCount, const volatile void* countAddress, std::uint32_t strideInBytes, std::uint64_t modifier) {
+    L3NoteGuestDraw_nid_no_patch(__builtin_return_address(0));
     Agc::Command::CheckBits(countIndirect, 1, __func__);
     Agc::Command::Require((dataOffsetInBytes & 3u) == 0 && (strideInBytes & 3u) == 0 && strideInBytes >= 16, __func__, "invalid indirect draw offset or stride");
     const auto address = reinterpret_cast<std::uintptr_t>(countAddress);

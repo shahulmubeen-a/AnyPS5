@@ -32,4 +32,9 @@ bool IsMarker(std::span<const std::uint32_t> packet);
 
 }
 
+// Called by libSceAgc's sceAgcDcbDraw* builders with their return address (the guest call site). When no
+// engine draw call is open on the calling thread, the call site is counted as a foreign draw site and listed
+// in the "[l3-sites]" line every 10 s as an eboot VA.
+extern "C" void L3NoteGuestDraw_nid_no_patch(const void* returnAddress);
+
 #endif

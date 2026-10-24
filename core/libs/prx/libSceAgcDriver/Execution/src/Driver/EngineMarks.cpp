@@ -14,6 +14,8 @@
 #include <vector>
 
 #ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
 #include "prx/libc/include/GuestHooks.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
 #endif
@@ -48,6 +50,26 @@ const char* const KindNames[KindCount] = {"?", "item", "instanced", "instanced-b
 
 std::mutex foreignMutex;
 std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> foreignPrograms;
+std::mutex sitesMutex;
+std::map<std::uint64_t, std::uint64_t> foreignSites;
+std::atomic<std::uint64_t> engineSiteDraws{0};
+
+#ifdef _WIN32
+// app.exe's .elf0 section start: eboot VA = host address - elf0.
+std::uintptr_t Elf0() {
+    static const std::uintptr_t elf0 = [] {
+        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        const auto* first = IMAGE_FIRST_SECTION(nt);
+        for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index) {
+            if (std::memcmp(first[index].Name, ".elf0\0\0\0", 8) == 0) return base + first[index].VirtualAddress;
+        }
+        return std::uintptr_t{0};
+    }();
+    return elf0;
+}
+#endif
 
 std::uint64_t Load64(std::uint64_t address) {
     std::uint64_t value = 0;
@@ -217,6 +239,22 @@ void Reporter() {
             }
             text += " (" + std::to_string(hot.size()) + " sets)\n";
         }
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> sites;
+        {
+            std::lock_guard lock(sitesMutex);
+            for (const auto& [site, count] : foreignSites) sites.emplace_back(count, site);
+            foreignSites.clear();
+        }
+        if (!sites.empty()) {
+            std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            text += "[l3-sites] (10 s) guest draw call sites outside engine draw calls (eboot VA of the return address):";
+            char item[64];
+            for (std::size_t index = 0; index < std::min<std::size_t>(sites.size(), 32); ++index) {
+                std::snprintf(item, sizeof(item), " 0x%llx %llu;", static_cast<unsigned long long>(sites[index].second), static_cast<unsigned long long>(sites[index].first));
+                text += item;
+            }
+            text += " (" + std::to_string(sites.size()) + " sites; inside engine calls " + std::to_string(engineSiteDraws.exchange(0)) + ")\n";
+        }
         std::fputs(text.c_str(), stderr);
         std::fflush(stderr);
     }
@@ -299,6 +337,22 @@ void NoteDrawPrograms(std::uint64_t first, std::uint64_t last) {
     if (!enabled || !worker.lastDrawForeign) return;
     std::lock_guard lock(foreignMutex);
     ++foreignPrograms[{first, last}];
+}
+
+
+extern "C" void L3NoteGuestDraw_nid_no_patch(const void* returnAddress) {
+    if (!Enabled()) return;
+#ifdef _WIN32
+    if (!openCalls.empty()) {
+        ++engineSiteDraws;
+        return;
+    }
+    const auto host = reinterpret_cast<std::uintptr_t>(returnAddress);
+    const auto elf0 = Elf0();
+    const auto va = elf0 != 0 && host >= elf0 ? host - elf0 : host;
+    std::lock_guard lock(sitesMutex);
+    ++foreignSites[va];
+#endif
 }
 
 }
