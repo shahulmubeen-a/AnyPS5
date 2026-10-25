@@ -79,3 +79,8 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   recorded behind their writer instead of waited for; full game 19.78 vs 18.44 presents per 10 s (+7%), three
   alternating repeats all positive, picture unchanged. APS5_PIPELINE_DISPATCH_MISSES on the full game: 18.44 vs
   18.44 (0%).
+- el13 (profiled trace with deferred stores on): committer GPU fence waits by thread drop from 10.5 s to 0.5 s per
+  60 s ([recorder] untagged), address-based syncs 8.0 s -> 0.1 s; but the trace shows Recorder.WaitSerial 71 ms per
+  frame on the committer (was 0.6) and the worker's room_wait 132 ms (was 52), drain 71 ms (was 158): the wait
+  moves to the next reader. Frame p50 552 ms (profiled). The chain worker -> committer -> GPU is the limit; the
+  CPU-side validation of GPU-written memory is the coupling.
