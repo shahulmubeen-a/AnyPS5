@@ -84,3 +84,6 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   frame on the committer (was 0.6) and the worker's room_wait 132 ms (was 52), drain 71 ms (was 158): the wait
   moves to the next reader. Frame p50 552 ms (profiled). The chain worker -> committer -> GPU is the limit; the
   CPU-side validation of GPU-written memory is the coupling.
+- Flake seen once (el14 first try, 35 s after launch, logos): `AGC driver: unsupported PM4 packet type: header
+  0x10326b40 at DWORD 408` right after a POP_MARKER whose two dwords replaced a SET_SH_REG header; log kept as
+  runs-best/run-el14-crash1.err.log. Rerun was clean.
