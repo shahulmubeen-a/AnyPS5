@@ -111,3 +111,14 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   htm ~45 waiting ~0.13 s (the remaining writers with deferred stores are unattributed without profiling). The
   committer's busy time drops from ~6.6 s to ~5.2 s per 10 s with both, but the queue-0 worker stays at ~97%: the
   worker is the limit now. Pictures identical (shots-el15).
+
+## Miss items, draw-ahead and the clean set with the fixes (el16, 07:20-08:05)
+- 3 alternating rounds, fps (presents per 10 s / 10): base 1.93/1.86/1.80 (mean 1.861), dh = deferstores + HTILE
+  masks 2.02/1.69/1.91, dhm (+ APS5_PIPELINE_DISPATCH_MISSES) 2.00/1.78/1.89, dhda (+ draw-ahead, APS5_NO_DRAW_AHEAD
+  switched off live) 2.05/1.91/1.93 (mean 1.963, +5.5%, 3/3 faster than the base of its round), dhmda 2.00/1.86/1.93.
+  Round 2 was slower for every setup (scene noise); without it dh +5.4%, dhm +4.3%, dhda +6.7%.
+- Clean set r0 (2 rounds): r0 3.05/2.86, r0-dh 3.06/2.94, r0-dhm 3.11/3.08, r0-dhda 3.06/3.02, r0-dhmda 3.06/3.06:
+  the fixes barely move it (+2-5%, within noise); the clean plateau stays ~3.0-3.1 fps.
+- Committer busy per 10 s: base ~6.7 s, dh ~5.1 s, dhm ~5.4 s, dhda ~5.0 s; the queue-0 worker stays ~97% busy.
+- Pictures unchanged for all of them (shots-el16). Miss-item frames showed fewer fallen leaves on the ground in one
+  pair, which also varies with time; not verified either way.

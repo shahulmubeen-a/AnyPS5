@@ -657,8 +657,9 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
                     // Porter: an HTILE mask clear recorded as a dispatch item notes its mask like the miss item and the
                     // direct path do (below), so the next depth draw's store-back expands the HTILE on the GPU instead
                     // of pre-syncing (VulkanDevice::PresyncDrawDepth waits for the whole GPU, ~6 per frame at HOME).
-                    // APS5_ITEM_HTILE_MASKS (runtime switch) while it is measured.
-                    if (htileMask.address != 0 && Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::ItemHtileMasks)) localDevice->NoteHtileMask(htileMask.address, htileMask.bytes, htileMask.mask, htileMask.value);
+                    // Measured in el15 (2026-10-25): depth pre-syncs 37 -> 0.4 per 10 s; with deferred stores +2% on top.
+                    // APS5_NO_ITEM_HTILE_MASKS=1 (runtime switch) turns it off.
+                    if (htileMask.address != 0 && !Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::NoItemHtileMasks)) localDevice->NoteHtileMask(htileMask.address, htileMask.bytes, htileMask.mask, htileMask.value);
                     break;
                 }
                 if (noteWrites && !writerKeyedEvidence()) noteWrittenBuffers(address, queueId, compiledCommit);
