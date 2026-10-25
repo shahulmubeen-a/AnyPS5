@@ -69,3 +69,13 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   <= 15 us, enqueuing (miss items) removes the 85 us (yotei-work/porter/research-dispatch-misses.md). Committer GPU
   waits come from StorageTexture::FlushPending, StoreReadbackBeforeLabel, depth-plane syncs; proposal P1/P2 in
   yotei-work/porter/research-committer-syncs.md.
+
+## Periodic passes and optimizations (el10-el12)
+- el10 (each cut alone on r0): grass, interior/wetness/decals, deformer, SSDO/SSS, composite depth bias, GPU culling,
+  cloth keep the picture (+0-12% each); water (its label covers scene lighting), proxy streams, CS lights, compute
+  meshes/displacement, terrain generation break it. el11: all "harmless" cuts together (4.07 fps) break the picture;
+  running passes every 2nd-4th frame breaks it too and is slower (2.6-2.9 fps). Clean plateau: ~3.1-3.3 fps.
+- el12 deferred stores (new rule "deferstores on", Texture.cpp PorterDeferReason): ~90 write-backs per frame
+  recorded behind their writer instead of waited for; full game 19.78 vs 18.44 presents per 10 s (+7%), three
+  alternating repeats all positive, picture unchanged. APS5_PIPELINE_DISPATCH_MISSES on the full game: 18.44 vs
+  18.44 (0%).
