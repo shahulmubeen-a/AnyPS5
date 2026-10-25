@@ -29,13 +29,20 @@ posts without my OK), take the shared locks before game runs, Ghidra jobs and bu
 checkable evidence, install nothing without asking, commits use my personal git identity, start game runs
 detached, never from Claude's shell. Never build while a measurement run is going (it skews the fps).
 
+Results of the night (details in the log): clean-picture plateau ~3.1-3.3 fps by cutting (shadows, particles,
+async effects); >= 5 fps (5.6) only with a broken picture; the new rule `deferstores on` (Texture.cpp
+PorterDeferReason) gives +7% on the full game with an intact picture; APS5_PIPELINE_DISPATCH_MISSES 0% on the full
+game. The frame is a chain of waits worker -> committer -> GPU; removing one wait moves it to the next reader.
+
 Next, in this order:
-1. Default APS5_PIPELINE_DISPATCH_MISSES for Yotei if the dispatch-miss research says it is safe, then make
-   repeated dispatches hit the dispatch cache (the drains before ~1,100 dispatch misses per frame cost ~158 ms).
-2. Remove the committer's GPU waits for data only the GPU consumes (research-committer-syncs.md).
-3. Port the porter L3 engine draw cache (porter/main, rounds 1-11) onto porter/elements and fix the vertex-fetch
-   pointer words (porter/main NEXT-SESSION item 1); measure on the world, not the menu.
-4. Keep the element map current: rerun `elem_build_map.py` after new runs.
+1. Make `deferstores` safe enough to be the default (run the storage/depth tests named in
+   yotei-work/porter/research-committer-syncs.md with it on), then remove the next wait it exposes: the pre-syncs
+   (VulkanDevice::PresyncDrawDepth / presync -> WaitRecorded, ~70 ms per frame) by expanding depth metadata on the
+   GPU (DepthSurface.cpp expandHtileOnGpu).
+2. Give compute-job misses a preparer like draws have, then retry APS5_PIPELINE_DISPATCH_MISSES (it moves ~158 ms
+   of drains per frame onto the committer; research-dispatch-misses.md).
+3. Port the porter L3 engine draw cache (porter/main) onto porter/elements and fix the vertex-fetch pointer words.
+4. Keep the element map current: rerun `porter/tools/elem_build_map.py` after new runs.
 
 Report in the style I have been getting: what was run, what it proved, what is next, with numbers.
 
