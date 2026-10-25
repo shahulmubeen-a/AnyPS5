@@ -12,7 +12,7 @@ import collections
 import json
 import re
 
-ROUND = re.compile(r"^\[elem\] round (\d+) \(10 s\): (\d+) labels active;(?: \d+ deferred stores;)? per queue worker/commit ms:(.*)$")
+ROUND = re.compile(r"^\[elem\] round (\d+) \(10 s\): (\d+) labels active;(?: \d+ deferred stores;)?(?: \d+ depth pre-syncs \d+ ms;)? per queue worker/commit ms:(.*)$")
 PASS = re.compile(r"^\[elem-pass\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (\d+) (\d+) (?:@(\d+) )?(.*)$")
 ENGINE = re.compile(r"^\[elem-engine\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) kind=(\d+) va=(0x[0-9a-f]+)$")
 MAT = re.compile(r"^\[elem-mat\] (\d+) ([\d.]+) ([\d.]+) ([\d.]+) (\d+) (\d+) (0x[0-9a-f]+) (.*)$")

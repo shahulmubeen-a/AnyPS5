@@ -1,0 +1,15 @@
+# el15 (2026-10-25): HTILE mask notes for dispatch items (APS5_ITEM_HTILE_MASKS), alone and with deferred stores, 3 rounds.
+measure 60
+base-1 75
+htm-1 75 switch APS5_ITEM_HTILE_MASKS on
+dhtm-1 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+defer-1 75 deferstores on
+base-2 75
+htm-2 75 switch APS5_ITEM_HTILE_MASKS on
+dhtm-2 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+defer-2 75 deferstores on
+base-3 75
+htm-3 75 switch APS5_ITEM_HTILE_MASKS on
+dhtm-3 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+defer-3 75 deferstores on
+base-z 75

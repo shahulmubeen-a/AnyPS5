@@ -5286,6 +5286,11 @@ void VulkanDevice::PrimeBindlessDraw(std::span<const Graphics::CompiledShader> s
     }
 }
 
+VulkanDevice::DepthPresyncStatistics VulkanDevice::DepthPresyncCounts() {
+    const auto& counters = DepthPresyncs();
+    return {counters.waited.load(std::memory_order_relaxed), counters.waitedUs.load(std::memory_order_relaxed)};
+}
+
 VulkanDevice::PresyncStatistics VulkanDevice::PresyncCounts() {
     const auto& counters = Presyncs();
     return {counters.checked.load(std::memory_order_relaxed), counters.presyncs.load(std::memory_order_relaxed), counters.keyChecks.load(std::memory_order_relaxed), counters.keyWaits.load(std::memory_order_relaxed)};

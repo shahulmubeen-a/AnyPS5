@@ -1,0 +1,18 @@
+# el16 (2026-10-25): on top of deferred stores + HTILE item masks (dh): dispatch miss items (m) and draw-ahead #6188 (da), 3 rounds.
+measure 60
+base-1 75
+dh-1 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+dhm-1 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+dhda-1 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_NO_DRAW_AHEAD off
+dhmda-1 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on;;switch APS5_NO_DRAW_AHEAD off
+base-2 75
+dh-2 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+dhm-2 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+dhda-2 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_NO_DRAW_AHEAD off
+dhmda-2 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on;;switch APS5_NO_DRAW_AHEAD off
+base-3 75
+dh-3 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on
+dhm-3 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+dhda-3 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_NO_DRAW_AHEAD off
+dhmda-3 75 deferstores on;;switch APS5_ITEM_HTILE_MASKS on;;switch APS5_PIPELINE_DISPATCH_MISSES on;;switch APS5_NO_DRAW_AHEAD off
+base-z 75

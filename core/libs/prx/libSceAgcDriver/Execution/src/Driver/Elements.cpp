@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -645,7 +646,14 @@ void Report() {
             sums.first += delta.ns;
             sums.second += delta.commitNs;
         }
-        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; %llu deferred stores; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size(), static_cast<unsigned long long>(Graphics::StorageTexture::TakePorterDeferredStores()));
+        // HTILE pre-syncs of depth draws in this round (VulkanDevice::PresyncDrawDepth): each waits for the GPU.
+        static std::uint64_t lastPresyncs = 0, lastPresyncUs = 0;
+        const auto presyncs = VulkanDevice::DepthPresyncCounts();
+        const auto presyncCount = presyncs.waited - lastPresyncs;
+        const auto presyncUs = presyncs.waitedUs - lastPresyncUs;
+        lastPresyncs = presyncs.waited;
+        lastPresyncUs = presyncs.waitedUs;
+        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; %llu deferred stores; %llu depth pre-syncs %.0f ms; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size(), static_cast<unsigned long long>(Graphics::StorageTexture::TakePorterDeferredStores()), static_cast<unsigned long long>(presyncCount), presyncUs / 1000.0);
         text += line;
         for (const auto& [queue, sums] : queues) {
             std::snprintf(line, sizeof(line), " q%llx %.0f/%.0f;", static_cast<unsigned long long>(queue == 0 ? 0 : queue - 1), Ms(sums.first), Ms(sums.second));

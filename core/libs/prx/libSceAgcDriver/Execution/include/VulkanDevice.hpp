@@ -286,6 +286,11 @@ public:
         std::uint64_t checked, presyncs, keyChecks, keyWaits;
     };
     static PresyncStatistics PresyncCounts();
+    // HTILE pre-syncs of depth draws (PresyncDrawDepth): waits and their time, cumulative, profiled or not.
+    struct DepthPresyncStatistics {
+        std::uint64_t waited, waitedUs;
+    };
+    static DepthPresyncStatistics DepthPresyncCounts();
     // Stage A of a dispatch's resource build, run WITHOUT GuestMemory::GpuMutex before Dispatch or
     // DispatchIndirect: the binding plan, data buffers, imports already serving the guest buffers,
     // read-only copies and the descriptor set (see ShaderResources). The dispatch completes it
