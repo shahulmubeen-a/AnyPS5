@@ -1,0 +1,2 @@
+# el13 (2026-10-25): profile and trace with the deferred stores on (where does the committer still wait?).
+measure-defer 180 deferstores on
