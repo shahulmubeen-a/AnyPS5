@@ -1,0 +1,3 @@
+# el17 (2026-10-25): profiled run (APS5_PROFILE_DRAW/GPU, timeline trace, samplers) of the clean cut set r0 with deferred stores + HTILE item masks: what bounds it at ~3 fps.
+measure 60
+r0-dh 300 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps;;deferstores on;;switch APS5_ITEM_HTILE_MASKS on

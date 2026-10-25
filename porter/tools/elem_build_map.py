@@ -51,12 +51,13 @@ def config_card(run, steps, label, name, plain, base_label=None, details=None, r
     on = base / 10 if base else None
     off = s["rate"] / 10 if s["rate"] is not None else None
     gain = 100.0 * (off - on) / on if (on and off is not None) else None
-    base_shot = None
+    base_shot = shot(run, base_label) if base_label is not None else None
+    base_caption = f"compared with: {base_label}" if base_shot else "full game (base)"
     for candidate in ("measure", "base-1", "base-a", "base0"):
         base_shot = base_shot or shot(run, candidate)
     return {"name": name, "plain": plain, "group": f"run {run}", "fps_on": on, "fps_off": off, "gain": gain,
             "cost": f"{off:.2f} fps" if off is not None else "", "details": details or [], "rule": rule,
-            "shots": [{"src": base_shot, "caption": "full game (base)"}, {"src": shot(run, label), "caption": name}]}
+            "shots": [{"src": base_shot, "caption": base_caption}, {"src": shot(run, label), "caption": name}]}
 
 
 def main():
@@ -74,8 +75,11 @@ def main():
     config_sections = []
     for section in texts["config_sections"]:
         cards = []
-        for run, label, name, plain in section["cards"]:
-            card = config_card(run, runs.get(run, []), label, name, plain)
+        for entry in section["cards"]:
+            # [run, label, name, text] or [run, label, name, text, base label]: the base label names the step the card
+            # compares with (default: the nearest base steps before and after it).
+            run, label, name, plain = entry[:4]
+            card = config_card(run, runs.get(run, []), label, name, plain, base_label=entry[4] if len(entry) > 4 else None)
             if card:
                 cards.append(card)
             else:

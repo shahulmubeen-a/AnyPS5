@@ -14,8 +14,8 @@
   },
   {
    "label": "optimization without cutting",
-   "value": "+5.6%",
-   "note": "deferred storage write-backs (new rule), 7 of 7 repeats faster"
+   "value": "+6.5%",
+   "note": "deferred stores + HTILE fix (both new tonight), 3 of 3 repeats; draw-ahead adds 1-2%"
   },
   {
    "label": "fastest setup measured",
@@ -233,6 +233,13 @@
      "The fastest setup measured whose picture still looks like the game. The old shadow map stays in memory, so shadows still show."
     ],
     [
+     "el16",
+     "r0-dhm-1",
+     "Fastest clean setup + tonight's fixes",
+     "The same cuts (no sun shadows, particles or async effects) with deferred stores, the HTILE fix and compute misses to the committer: 3.10 fps against 2.96 for the cuts alone in the same run (two repeats each; with draw-ahead 3.04-3.06). The fixes barely move this setup: what is left is bound by other work (see the last section).",
+     "r0-1"
+    ],
+    [
      "el9",
      "r0-c3",
      "Shadows, particles and async effects removed",
@@ -267,55 +274,37 @@
   {
    "id": "opt",
    "title": "Making it faster without cutting anything",
-   "intro": "Two emulator changes measured on the full game, alternating with the unchanged game in the same run: three repeats in run el12 and four in run el14. The pictures are full frames with nothing removed.",
+   "intro": "Emulator changes measured on the full game, alternating with the unchanged game in the same run (runs el12 and el14 to el16). Each card compares one repeat with the unchanged game measured just before and after it; the text gives the average over all repeats. The pictures are full frames with nothing removed. The scene is not perfectly steady (one round of el16 was slower for every setup), so differences under about 3% are noise.",
    "cards": [
     [
-     "el12",
-     "defer-1",
-     "Deferred stores (run el12, repeat 1)",
-     "New experimental rule from tonight: the committer records storage write-backs behind their writer on the graphics card instead of waiting for the card (about 90 per frame). Picture unchanged."
-    ],
-    [
-     "el12",
-     "defer-2",
-     "Deferred stores (el12, repeat 2)",
-     "Same change."
-    ],
-    [
-     "el12",
-     "defer-3",
-     "Deferred stores (el12, repeat 3)",
-     "Same change. el12 average: 19.8 vs 18.4 presents per 10 s (+7.3%)."
-    ],
-    [
      "el14",
      "defer-1",
-     "Deferred stores (run el14, repeat 1)",
-     "Same change, a second run."
+     "Deferred stores",
+     "New rule from tonight (<code>deferstores on</code>): the committer records storage write-backs behind their writer on the graphics card instead of waiting for the card (about 90 per frame). Average over 10 repeats in three runs: +5% (el12 +7.3%, el14 +4.4%, el15 +4.5%), every repeat faster. Picture unchanged."
     ],
     [
-     "el14",
-     "defer-2",
-     "Deferred stores (el14, repeat 2)",
-     "Same change."
+     "el15",
+     "htm-1",
+     "HTILE masks for queued compute jobs",
+     "Bug fix from tonight (APS5_ITEM_HTILE_MASKS): a depth clear queued for the committer now tells the depth code what it wrote, as the other paths already did. Before, the next depth draw stopped and waited for the whole graphics card about 4 times per second. With the fix: 37 waits per 10 s become 0.4. Alone it changes nothing (-0.7%, noise): without deferred stores each wait is short."
     ],
     [
-     "el14",
-     "defer-3",
-     "Deferred stores (el14, repeat 3)",
-     "Same change."
+     "el15",
+     "dhtm-1",
+     "Deferred stores + HTILE masks",
+     "Both together. Deferred stores alone make each HTILE wait long (2.6 s of waiting per 10 s, because more work is queued on the card); the HTILE fix removes most of it (0.1-0.2 s), and the committer's busy time drops by 22%. Average +6.5% over the unchanged game (2.00, 2.00, 2.03 vs 1.89 fps), 3 of 3 repeats faster. Picture unchanged."
     ],
     [
-     "el14",
-     "defer-4",
-     "Deferred stores (el14, repeat 4)",
-     "Same change. el14 average: 19.4 vs 18.6 (+4.4%). All 7 repeats of both runs were faster than the unchanged game around them: +5.6% on average."
+     "el16",
+     "dhda-1",
+     "... + draw-ahead",
+     "Adds the existing switch for mitul72's draw-ahead (#6188, off in our setup because it once stalled at boot; switched on here during gameplay): helper threads capture and compile upcoming draws before the main thread gets to them. In el16, 1.96 fps against 1.86 for the unchanged game (+5.5%, 3 of 3 repeats faster), 1-2% above deferred stores + HTILE alone. Picture unchanged."
     ],
     [
-     "el12",
-     "misses-1",
-     "Compute misses to the committer",
-     "The existing switch APS5_PIPELINE_DISPATCH_MISSES on the full game: no change in three repeats (it helped +14% only when much of the frame was cut)."
+     "el16",
+     "dhm-1",
+     "... + compute misses to the committer",
+     "Adds APS5_PIPELINE_DISPATCH_MISSES (compute jobs that miss the cache are queued for the committer instead of making the main thread wait). No gain on top (1.89 vs 1.88 fps for deferred stores + HTILE alone): most of the waits it should remove come back as waits for queue space."
     ]
    ]
   },

@@ -96,3 +96,18 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   40.0/40.7 and 33.0/38.3; el14 r0 30.6/31.9 and 30.0/25.7); deferstores + APS5_PIPELINE_DISPATCH_MISSES on r0
   31.4 and 27.8. The element map's optimization cards were empty until elem_build_map.py learned to load every run
   its cards name (fixed 06:45).
+
+## HTILE masks for dispatch items (el15, 06:52-07:20)
+- Cause found in the profiled el13 log: the depth pre-sync's newest writers were "q0x0 op 0x15 prog 0x0 exact <htile
+  range>", i.e. depth clears recorded by dispatch items on the committer (no write origin there). The dispatch-item
+  hit path (APS5_PIPELINE_DISPATCH) never called NoteHtileMask, unlike the miss item and the direct path, so the next
+  depth draw's store-back could not expand the HTILE on the GPU and PresyncDrawDepth waited for the whole GPU.
+- Fix: Dispatch.cpp notes the mask after recording the item (opt-in switch APS5_ITEM_HTILE_MASKS for the A/B; flipped
+  to default-on with APS5_NO_ITEM_HTILE_MASKS afterwards). New unprofiled counter: the [elem] round line prints depth
+  pre-syncs and their wait per 10 s (VulkanDevice::DepthPresyncCounts); porter/tools/elem_steps.py sums it per step.
+- el15, 3 alternating rounds (presents per 10 s / 10 = fps): base 1.887, htm 1.873 (-0.7%, noise), deferstores 1.971
+  (+4.5%), deferstores + htm 2.010 (+6.5%, 3/3 repeats faster). Depth pre-syncs per 10 s: base ~42 waiting ~0.2 s,
+  htm 0.4, deferstores ~115 waiting ~2.65 s (the waits grow because more work is queued on the GPU), deferstores +
+  htm ~45 waiting ~0.13 s (the remaining writers with deferred stores are unattributed without profiling). The
+  committer's busy time drops from ~6.6 s to ~5.2 s per 10 s with both, but the queue-0 worker stays at ~97%: the
+  worker is the limit now. Pictures identical (shots-el15).
