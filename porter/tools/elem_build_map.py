@@ -68,7 +68,9 @@ def main():
     subprocess.run([sys.executable, "-I", os.path.join(HERE, "elem_spec.py"), "--run", "el2", "--out", spec_path], check=True)
     spec = json.load(open(spec_path, encoding="utf-8"))
     texts = json.load(open(os.path.join(HERE, "elem_texts.json"), encoding="utf-8"))
-    runs = {name: plan(name) for name in ("el3", "el5", "el6", "el7", "el9", "el10", "el11")}
+    # Every run named by a configuration card (a run missing here silently drops its cards).
+    names = {card[0] for section in texts["config_sections"] for card in section["cards"]}
+    runs = {name: plan(name) for name in sorted(names)}
     config_sections = []
     for section in texts["config_sections"]:
         cards = []
@@ -76,6 +78,8 @@ def main():
             card = config_card(run, runs.get(run, []), label, name, plain)
             if card:
                 cards.append(card)
+            else:
+                print(f"warning: no step {label} in run {run}; card left out", file=sys.stderr)
         config_sections.append({"id": section["id"], "title": section["title"], "intro": section["intro"], "cards": cards})
     for key in ("title", "subtitle", "summary", "facts", "glossary", "footer", "breakdown", "breakdown_title", "breakdown_note", "breakdown_total_ms", "group_names"):
         if key in texts:

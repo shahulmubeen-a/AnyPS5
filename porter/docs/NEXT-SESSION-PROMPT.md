@@ -31,7 +31,7 @@ detached, never from Claude's shell. Never build while a measurement run is goin
 
 Results of the night (details in the log): clean-picture plateau ~3.1-3.3 fps by cutting (shadows, particles,
 async effects); >= 5 fps (5.6) only with a broken picture; the new rule `deferstores on` (Texture.cpp
-PorterDeferReason) gives +7% on the full game with an intact picture; APS5_PIPELINE_DISPATCH_MISSES 0% on the full
+PorterDeferReason) gives +5.6% on the full game with an intact picture (7 of 7 alternating repeats faster, runs el12 and el14); APS5_PIPELINE_DISPATCH_MISSES 0% on the full
 game. The frame is a chain of waits worker -> committer -> GPU; removing one wait moves it to the next reader.
 
 Next, in this order:

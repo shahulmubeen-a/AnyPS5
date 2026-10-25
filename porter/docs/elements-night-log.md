@@ -90,3 +90,9 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
 - The new committer wait with deferred stores is Recorder::WaitSerial via VulkanDevice::WaitRecorded, called from the
   HTILE pre-sync (PresyncDrawDepth, VulkanDevice.cpp ~4580) and the DCC-key presync (~5234): the committer reads GPU-written metadata on the
   CPU before depth draws. Next on this path: expand HTILE on the GPU (DepthSurface.cpp expandHtileOnGpu, agent P2).
+- el14 (final numbers, deferred stores four more times, 75 s steps): base 18.75/18.75/18.5/18.29, defer
+  19.75/19.75/18.86/19.17 presents per 10 s, average 19.38 vs 18.57 (+4.4%), all four positive. Together with el12:
+  7 of 7 repeats faster, +5.6% on average. On the clean r0 configuration the effect drowns in noise (el12 clean
+  40.0/40.7 and 33.0/38.3; el14 r0 30.6/31.9 and 30.0/25.7); deferstores + APS5_PIPELINE_DISPATCH_MISSES on r0
+  31.4 and 27.8. The element map's optimization cards were empty until elem_build_map.py learned to load every run
+  its cards name (fixed 06:45).
