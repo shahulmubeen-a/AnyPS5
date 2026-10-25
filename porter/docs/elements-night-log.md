@@ -122,3 +122,20 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
 - Committer busy per 10 s: base ~6.7 s, dh ~5.1 s, dhm ~5.4 s, dhda ~5.0 s; the queue-0 worker stays ~97% busy.
 - Pictures unchanged for all of them (shots-el16). Miss-item frames showed fewer fallen leaves on the ground in one
   pair, which also varies with time; not verified either way.
+
+## Profiled clean set (el17, 08:05-08:22) and queue depth (el18, 08:23-08:56)
+- el17: r0 + deferstores + HTILE masks with APS5_PROFILE_DRAW/GPU, an 8-frame trace (presents 3000-3007) and the
+  samplers. Frame p50 332 ms (2.97 fps). Queue-0 worker: 219 ms busy, of which DrawPipeline.drain.packet 58 ms (about
+  two thirds before compute jobs, the rest at other packets); waits 92 ms (room_wait 42, WorkerWait 25 = waiting for
+  the title's next submission, WaitSerial 12, memory_wait 10). Own work ~160 ms. Committer 193 ms busy
+  (DrawPipeline.commit 200, Graphics.Draw 186, Resources.Complete 50), almost no GPU waits (fence 2.6, Sync 2.3).
+  GPU busy 113 ms. Worker sampler: DrawPipeline::Drain 29% (two thirds under dispatchAttempt), Enqueue 11%,
+  materializeDrawStage 16%. With perfect overlap the clean set would run at ~4.5 fps.
+- el18 (build with the HTILE masks on by default): the game opened its photo mode by itself during the first r0
+  step (no pad input was sent then; the frame shows "TRACKING SHOT ... SET POSITION", camera behind the character,
+  and a blocky white glare at the top left in two frames), so el18 is not a gameplay measurement. Within the run:
+  r0 + deferstores 3.46, + misses 3.40/3.46, + misses + pipedepth 128 3.29/2.69, + 256 3.45/2.80, deferstores +
+  pipedepth 128 3.40/2.78 (all variants fell to ~2.7-2.8 from the middle of round 2); full game base 1.86/1.83,
+  deferstores 1.97/2.08 (+10%), deferstores + misses + pipedepth 128 1.85/1.98. Depth pre-syncs ~0 per 10 s with
+  the default-on build. Conclusion: queue depth and miss items give nothing measurable; plateau for switch-level
+  changes.

@@ -29,20 +29,26 @@ posts without my OK), take the shared locks before game runs, Ghidra jobs and bu
 checkable evidence, install nothing without asking, commits use my personal git identity, start game runs
 detached, never from Claude's shell. Never build while a measurement run is going (it skews the fps).
 
-Results of the night (details in the log): clean-picture plateau ~3.1-3.3 fps by cutting (shadows, particles,
-async effects); >= 5 fps (5.6) only with a broken picture; the new rule `deferstores on` (Texture.cpp
-PorterDeferReason) gives +5.6% on the full game with an intact picture (7 of 7 alternating repeats faster, runs el12 and el14); APS5_PIPELINE_DISPATCH_MISSES 0% on the full
-game. The frame is a chain of waits worker -> committer -> GPU; removing one wait moves it to the next reader.
+Results of the night (details in the log): clean-picture plateau ~3.0-3.1 fps by cutting (shadows, particles,
+async effects), unchanged by the fixes below; >= 5 fps (5.6) only with a broken picture. On the full game: the new
+rule `deferstores on` (Texture.cpp PorterDeferReason) +5% (10 of 10 repeats); together with the HTILE item-mask fix
+(Dispatch.cpp, a real bug: depth clears queued as dispatch items never noted their HTILE mask, so depth draws
+pre-synced on the whole GPU; default-on since 296e05120, APS5_NO_ITEM_HTILE_MASKS=1 turns it off) +6.5%; the existing
+draw-ahead switch (APS5_NO_DRAW_AHEAD off, switched live) adds ~1-2%; APS5_PIPELINE_DISPATCH_MISSES and a deeper committer queue (pipedepth 128/256) ~0 (el16; el18 agrees, but the game
+opened its photo mode by itself during el18, so el18 is not a gameplay measurement).
+The el17 trace of the clean set: queue-0 worker ~160 ms own work + ~100 ms waiting for the committer per frame
+(drains 58 ms, full queue 42 ms), committer 193 ms busy with almost no GPU waits, GPU 113 ms.
 
 Next, in this order:
-1. Make `deferstores` safe enough to be the default (run the storage/depth tests named in
-   yotei-work/porter/research-committer-syncs.md with it on), then remove the next wait it exposes: the pre-syncs
-   (VulkanDevice::PresyncDrawDepth / presync -> WaitRecorded, ~70 ms per frame) by expanding depth metadata on the
-   GPU (DepthSurface.cpp expandHtileOnGpu).
-2. Give compute-job misses a preparer like draws have, then retry APS5_PIPELINE_DISPATCH_MISSES (it moves ~158 ms
-   of drains per frame onto the committer; research-dispatch-misses.md).
-3. Port the porter L3 engine draw cache (porter/main) onto porter/elements and fix the vertex-fetch pointer words.
-4. Keep the element map current: rerun `porter/tools/elem_build_map.py` after new runs.
+1. Let the worker and the committer overlap (clean set potential ~4.5 fps): queue more packet kinds for the committer
+   instead of draining it (compute misses already a switch; indirect dispatches, WAIT_REG_MEM on labels), then retry a
+   deeper queue. Drains by opcode are in the profiled `[draw] pipelined` line.
+2. Make the committer cheaper: Graphics::Draw draw_and_resource_release (~70-90 us per draw, Resources.Complete
+   ~50 ms per frame); the descriptor-heap model (yotei-tsushima / descriptor heap memory notes).
+3. Make `deferstores` safe enough to be the default (storage/depth tests in research-committer-syncs.md).
+4. Port the porter L3 engine draw cache (porter/main) and fix the vertex-fetch pointer words.
+5. Keep the element map current: rerun `porter/tools/elem_build_map.py` after new runs; `elem_steps.py --run <tag>`
+   summarizes a plan run per step (fps, deferred stores, depth pre-syncs, queue-0 load).
 
 Report in the style I have been getting: what was run, what it proved, what is next, with numbers.
 

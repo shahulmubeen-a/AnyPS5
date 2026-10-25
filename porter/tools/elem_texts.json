@@ -10,7 +10,7 @@
   {
    "label": "fastest setup with an intact picture",
    "value": "3.1 fps",
-   "note": "no sun shadows, particles or async effects (+65%)"
+   "note": "no sun shadows, particles or async effects; tonight’s fixes do not move it"
   },
   {
    "label": "optimization without cutting",
@@ -32,19 +32,20 @@
   "<b>Short answer.</b> The world is slow because of how many small orders the game sends to the graphics card, not because of one expensive element. Every frame has about 3,000 draws and 2,500 compute jobs, and the emulator spends roughly 0.1 ms of CPU time on each one. On top of that, its threads keep waiting for each other and for the graphics card.",
   "<b>What cutting does.</b> Switching off one element at a time barely changes the frame rate: the main scene pass gives +30%, instanced objects +17%, everything else stays within about 10%. The time saved in one place is lost waiting at the next meeting point between the emulator's threads.",
   "<b>The 5 fps result.</b> Removing many parts at once reaches 5.6 fps, so the goal is reachable by cutting. But at that point the picture breaks: the parts still needed read results the cut parts should have written. The fastest setup that still looks like the game runs at 3.1 fps (no sun shadows, particles or async effects). Running passes only every second or third frame instead of removing them did not save the picture either.",
-  "<b>What this means for a real fix.</b> Deleting parts of the game hits a wall around 3 fps. The way forward is to make every draw and compute job cheaper and to remove the waiting between threads. The last section lists the concrete changes, with the two that are already switches in this build."
+  "<b>What this means for a real fix.</b> Deleting parts of the game hits a wall around 3 fps. Tonight's emulator fixes make the full game 6-10% faster without removing anything (deferred stores plus a bug fix for depth clears: about 1.9 to 2.0 fps), but they do not move the clean setup, which stays at 3.0-3.1 fps. Beyond that, no switch helps: the emulator's two main threads each need about 160-190 ms per frame and wait for each other. The last section lists the concrete changes, ordered by how much they can give."
  ],
- "why_intro": "Measured with a timeline trace of 8 frames, CPU sampling of the two main emulator threads and GPU timing per program.",
+ "why_intro": "Measured with timeline traces of 8 frames (full game el4, clean setup el17), CPU sampling of the two main emulator threads and GPU timing per program.",
  "why": [
   "<b>The emulator's main thread waits more than it works.</b> Of its 520 ms per frame, about 300 ms are waiting: 158 ms for the draw committer to catch up before compute jobs, 52 ms because the committer's queue is full, 41 ms for async queues and the GPU, 30 ms for the shared GPU lock. Its own translation work is about 200 ms.",
   "<b>Why it waits for the committer.</b> Almost every compute job (about 2,300 per second) misses the emulator's compute cache, because its inputs move every frame. A missed job is prepared on the main thread, and before that the main thread must wait until the committer has recorded every draw in front of it. An existing switch, APS5_PIPELINE_DISPATCH_MISSES, hands these jobs to the committer instead; it gave +14% on the lean configuration.",
   "<b>The committer waits for the graphics card.</b> It records about 1,900 draws per frame (about 340 ms of work) and blocks about 67 ms per frame on GPU results, for example when a draw needs a texture that a compute job just wrote.",
   "<b>Five single stalls of 40-60 ms each.</b> Interior Volumes (one draw that waits for the GPU), Deferred wetness (one compute job that waits for the committer), Cull CS Lights and Ambient Spec Update (async queue 0x38), Directional Shadow Combine (async queue 0x30). Cutting one of them moves the same wait to the next meeting point, which is why single cuts help so little.",
   "<b>The async queues hold the frame too.</b> With every draw and compute job of the main queue removed, the frame still takes 320 ms (3.1 fps), because the main queue waits for the async queues. With everything removed the game runs at 40 fps.",
+  "<b>Why even the clean setup stops at about 3 fps.</b> A trace of the fastest clean setup with tonight's fixes (run el17, 332 ms per frame) shows two emulator threads with about 160-190 ms of CPU work each per frame: the main thread translating the game's orders (about 160 ms of its own work) and the committer recording them for the graphics card (193 ms busy, now with almost no GPU waits). They should overlap, but the main thread spends about 100 ms per frame waiting for the committer: 58 ms letting it finish before compute jobs and other orders that need its results, 42 ms because its queue is full. Another 50 ms go to waiting for the game's next orders and for the graphics card, which itself is busy only 113 ms per frame. If the two threads overlapped fully, the clean setup would run at about 4.5 fps; beyond that the committer's own recording cost is the limit.",
   "<b>The graphics card itself</b> spends about 190 ms of program time per frame. Particles take about 48 ms, cloth about 40 ms, and the emulator's own upload copies about 41 ms.",
-  "<b>Why a removed wait comes back somewhere else.</b> Tonight's deferred stores cut the committer's direct GPU waits from about 90 ms to about 4 ms per frame, yet the frame only got about 5% faster: a new wait of about 70 ms appeared one step later (Recorder.WaitSerial), and the main thread now spends 132 ms per frame on a full committer queue instead of 52 ms. The emulator checks many resources by reading their memory on the CPU, so whenever the graphics card has just written that memory, some thread has to wait for it. The frame is a chain of such waits between the main thread, the committer and the graphics card."
+  "<b>Why a removed wait comes back somewhere else.</b> Tonight's deferred stores cut the committer's direct GPU waits from about 90 ms to about 4 ms per frame, yet the frame only got about 5% faster: a new wait appeared one step later. That one turned out to be a bug: depth clears queued for the committer did not tell the depth code what they wrote, so the next depth draw stopped and waited for the whole graphics card (2.6 s of waiting per 10 s once the card had more queued work). Fixed tonight, those waits drop to 0.1-0.2 s per 10 s and the committer is 22% less busy. The frame still gains only 6.5% in total, because the main thread, not the committer, is now the limit."
  ],
- "causes_intro": "Measured per frame at HOME (runs el2-el4). 'Worker' is the main emulator thread, 'committer' the thread that records draws for the PC graphics card.",
+ "causes_intro": "Measured per frame at HOME (runs el2-el4, el13, el15, el17). 'Worker' is the main emulator thread, 'committer' the thread that records draws for the PC graphics card.",
  "causes_table": {
   "columns": [
    "Root cause",
@@ -89,8 +90,14 @@
    [
     "Committer waits for GPU results",
     "committer",
-    "67 ms",
-    "Recorder.Sync; storage-texture flushes, read-backs before labels, depth-plane syncs"
+    "67 ms (about 4 ms with deferred stores)",
+    "Recorder.Sync; storage-texture flushes, read-backs before labels, depth-plane syncs. Deferred stores (new rule) record them behind their writer on the GPU instead"
+   ],
+   [
+    "Depth pre-syncs (bug, fixed tonight)",
+    "committer, before depth draws",
+    "up to 140 ms (with deferred stores), now ~1 ms",
+    "depth clears queued as compute items did not note their HTILE mask; [elem] round \"depth pre-syncs\": 115 per 10 s waiting 2.6 s, after the fix 45 waiting 0.1 s (el15)"
    ],
    [
     "Waiting for async queues",
@@ -114,11 +121,11 @@
  },
  "next_intro": "Ordered by how much of the frame each one attacks. None of these removes anything from the picture. Details and code references: yotei-work/porter/research-*.md.",
  "next": [
-  "<b>1. Stop draining before compute jobs (already a switch).</b> About 1,100 compute jobs per frame miss the emulator's compute cache and are prepared on the main thread after waiting for the committer: 156 us each, 85 us of it the wait. A cache hit would only save about 15 us; handing the missed job to the committer (APS5_PIPELINE_DISPATCH_MISSES) removes the 85 us. Measured: no change on the full game in three alternating repeats (el12), +14% once much of the frame is cut (el5); the committer becomes the next limit.",
-  "<b>2. Stop the committer from waiting for the graphics card (new experimental rule).</b> The committer waits about 67 ms per frame for GPU results, mostly to copy storage images back to memory before a label, before a depth-plane store or when an image is created. Recording those copies behind their writer on the GPU instead keeps the order without the wait. Measured: +5.6% on the full game, picture unchanged, 7 of 7 alternating repeats faster (runs el12 and el14; rule <code>deferstores on</code>). The wait then shows up in the pre-syncs (Recorder::WaitSerial, about 70 ms per frame; called through VulkanDevice::WaitRecorded from PresyncDrawDepth for depth metadata and from presync for colour-compression keys): the committer still reads GPU-written metadata on the CPU before those draws. Expanding the depth metadata on the GPU (DepthSurface.cpp expandHtileOnGpu) is the next step on this path.",
-  "<b>3. Remember draws across frames.</b> 70-80% of the world's draws repeat with only a small constant block changing. The porter's engine draw cache (branch porter/main) reuses the prepared draw by engine object; in the world it hits only 3% today because of the vertex-fetch pointer words, which is the first fix to make before porting it here.",
-  "<b>4. A second committer, or a preparer for compute jobs.</b> Draws already have a preparer thread that builds part of each draw ahead of the committer; compute jobs do not. Splitting their preparation the same way would let the committer keep up once item 1 hands it all the misses.",
-  "<b>5. Descriptor heap.</b> Draws that read memory through address tables cost 371 us each in the committer; a descriptor heap with stable indices (the Tsushima PC model, VK_EXT_descriptor_heap on NVIDIA 610+) replaces most of that work.",
+  "<b>1. Let the main thread and the committer overlap.</b> In the clean setup each needs about 160-190 ms per frame, yet the main thread waits about 100 ms per frame for the committer (run el17): it lets the committer finish before compute jobs and before orders that need GPU results (waits on labels, indirect jobs), and it stalls when the committer's queue of 64 items is full. Queuing those orders for the committer instead of waiting would bring the clean setup towards 4.5 fps. Tried tonight with existing switches: compute misses to the committer (APS5_PIPELINE_DISPATCH_MISSES) and a deeper queue (128, 256) give nothing measurable on their own (el16; run el18, in photo mode, agrees), because the backlog still drains at the next order that waits.",
+  "<b>2. Make the committer cheaper.</b> It records each draw for the PC graphics card in about 70-90 us (193 ms per frame in the clean setup, 270 ms in the full game), mostly building resources and descriptor sets. A descriptor heap with stable indices (the Tsushima PC model, VK_EXT_descriptor_heap) replaces most of that work; draws that read memory through address tables cost 371 us each today.",
+  "<b>3. Deferred stores as the default (new experimental rule, +5%).</b> The committer records storage write-backs behind their writer on the graphics card instead of waiting. 10 of 10 repeats faster, pictures unchanged; before it becomes the default, the storage and depth tests named in research-committer-syncs.md must pass with it on.",
+  "<b>4. Already done tonight: the HTILE fix.</b> Depth clears queued as compute items never told the depth code what they wrote, so the next depth draw waited for the whole graphics card. Fixed and on by default in this build (APS5_NO_ITEM_HTILE_MASKS=1 turns it off); worth offering upstream after a test pass. Draw-ahead (APS5_NO_DRAW_AHEAD removed from the settings) adds another 1-2% and is worth keeping on if it never stalls at boot again.",
+  "<b>5. Remember draws across frames.</b> 70-80% of the world's draws repeat with only a small constant block changing. The porter's engine draw cache (branch porter/main) reuses the prepared draw by engine object; in the world it hits only 3% today because of the vertex-fetch pointer words, which is the first fix to make before porting it here.",
   "<b>6. The game's own settings help little.</b> One shadow cascade and a shorter shadow distance gave 0-9%, within the noise; lower detail levels made an older build slower."
  ],
  "footer": "Made by the porter element tools on branch porter/elements (ps5-porter). Everything stays on this PC. Raw data: yotei-work/runs-best (run-elN.err.log, plan-elN.txt, shots-elN). Working log: ps5-porter/porter/docs/elements-night-log.md.",
@@ -274,7 +281,7 @@
   {
    "id": "opt",
    "title": "Making it faster without cutting anything",
-   "intro": "Emulator changes measured on the full game, alternating with the unchanged game in the same run (runs el12 and el14 to el16). Each card compares one repeat with the unchanged game measured just before and after it; the text gives the average over all repeats. The pictures are full frames with nothing removed. The scene is not perfectly steady (one round of el16 was slower for every setup), so differences under about 3% are noise.",
+   "intro": "Emulator changes measured on the full game, alternating with the unchanged game in the same run (runs el12 and el14 to el16, el18). Each card compares one repeat with the unchanged game measured just before and after it; the text gives the average over all repeats. The pictures are full frames with nothing removed. The scene is not perfectly steady (one round of el16 was slower for every setup), so differences under about 3% are noise.",
    "cards": [
     [
      "el14",
@@ -286,13 +293,19 @@
      "el15",
      "htm-1",
      "HTILE masks for queued compute jobs",
-     "Bug fix from tonight (APS5_ITEM_HTILE_MASKS): a depth clear queued for the committer now tells the depth code what it wrote, as the other paths already did. Before, the next depth draw stopped and waited for the whole graphics card about 4 times per second. With the fix: 37 waits per 10 s become 0.4. Alone it changes nothing (-0.7%, noise): without deferred stores each wait is short."
+     "Bug fix from tonight (on by default in this build; APS5_NO_ITEM_HTILE_MASKS=1 turns it off; measured here as an opt-in switch): a depth clear queued for the committer now tells the depth code what it wrote, as the other paths already did. Before, the next depth draw stopped and waited for the whole graphics card about 4 times per second. With the fix: 37 waits per 10 s become 0.4. Alone it changes nothing (-0.7%, noise): without deferred stores each wait is short."
     ],
     [
      "el15",
      "dhtm-1",
      "Deferred stores + HTILE masks",
      "Both together. Deferred stores alone make each HTILE wait long (2.6 s of waiting per 10 s, because more work is queued on the card); the HTILE fix removes most of it (0.1-0.2 s), and the committer's busy time drops by 22%. Average +6.5% over the unchanged game (2.00, 2.00, 2.03 vs 1.89 fps), 3 of 3 repeats faster. Picture unchanged."
+    ],
+    [
+     "el18",
+     "d-2",
+     "Deferred stores, HTILE fix built in (photo mode)",
+     "The build with the HTILE fix on by default (run el18). During this run the game opened its photo mode by itself (camera behind the character, world paused; no button was sent at that moment), so the scene differs from the other runs. Within the run, deferred stores give 1.97 and 2.08 fps against 1.86 and 1.83 for the same build without them (+10%, 2 of 2 repeats faster), and the depth pre-syncs stay at about 0 per 10 s."
     ],
     [
      "el16",
