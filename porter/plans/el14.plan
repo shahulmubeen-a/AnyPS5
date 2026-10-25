@@ -1,0 +1,17 @@
+# el14 (2026-10-25): final numbers: full game vs deferred stores (4 repeats), clean cut set with and without deferred stores and misses.
+measure 60
+base-1 75
+defer-1 75 deferstores on
+base-2 75
+defer-2 75 deferstores on
+base-3 75
+defer-3 75 deferstores on
+base-4 75
+defer-4 75 deferstores on
+r0-1 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps
+r0-defer-1 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps;;deferstores on
+r0-defer-misses-1 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps;;deferstores on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+r0-2 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps
+r0-defer-2 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps;;deferstores on
+r0-defer-misses-2 75 passx q0|Frame/Cascaded shadow map;;pass q0|Frame/Cascaded shadow map/;;passx q30|Directional Shadow Combine;;passx q30|Enqueue Shadow Resolve;;pass q30|Resolve Shadow Map Slice;;passx q38|Directional Shadow Copy;;pass q30|Screen Space Shadows;;pass Particle;;passx q38|Ambient Spec Update;;passx q38|Async ambient sh;;passx q38|Cull CS Lights;;passx q38|Volfog;;passx q38|SSR;;passx q48|Async Sh Grid Update;;passx q48|Async Clouds Update;;passx q30|Update Oct Maps;;deferstores on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+base-z 75
