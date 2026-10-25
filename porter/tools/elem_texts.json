@@ -333,6 +333,13 @@
      "Shadows, particles, async effects, water, grass, small passes, post-processing details, GPU culling, proxy streams, local lights, cloth, terrain generation, compute meshes and displacement removed."
     ],
     [
+     "el19",
+     "lean-d-1",
+     "Lean cut set + tonight's fixes",
+     "The 5.6 fps lean set again (run el19), with deferred stores and the HTILE fix: 5.60 fps against 5.50 without them in the same round, and draw-ahead or compute misses on top change nothing (5.53, 5.50). In the second round the scene got slower for every setup (the full game fell from 1.87 to 1.69 fps), so only the first round counts. The fixes do not raise this number.",
+     "lean-1"
+    ],
+    [
      "el6",
      "l2-sw-c1",
      "Lean set + switches + one shadow cascade: 5.5 fps",

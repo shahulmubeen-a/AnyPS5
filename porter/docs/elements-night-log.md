@@ -139,3 +139,10 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
   deferstores 1.97/2.08 (+10%), deferstores + misses + pipedepth 128 1.85/1.98. Depth pre-syncs ~0 per 10 s with
   the default-on build. Conclusion: queue depth and miss items give nothing measurable; plateau for switch-level
   changes.
+
+## Lean set with the fixes (el19, 09:00-09:23, last run of the night)
+- lean-b rules from el5 on the default-on build. Round 1: lean 5.50, + deferstores 5.60, + draw-ahead 5.53, + miss
+  items 5.50 fps. Round 2 slower for every setup (lean 3.10 with a full-screen garbage sky frame, + deferstores 4.77,
+  4.50, 4.74; the full game fell from 1.87 at the start to 1.69 at the end). The fixes do not raise the >= 5 fps
+  number; the picture is broken as before (green garbage over the sky).
+- Night ends here at the user's request (09:23). Locks released.
