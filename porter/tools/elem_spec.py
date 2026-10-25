@@ -149,9 +149,9 @@ def main():
         "subtitle": f"Run {args.run}, gameplay at HOME (Ezo save), 1080p. Baseline {presents / 10:.2f} fps.",
         "sections": [
             {"id": "passes", "title": "Render passes", "intro": "Each card removes one pass of the frame for 40 seconds. The two pictures show the scene with the pass and without it; the numbers are frames per second before and after.", "cards": cards["pass"]},
-            {"id": "engine", "title": "Engine draw functions", "intro": "The same scene with one of the game's own draw functions switched off at the emulator.", "cards": cards["engine"]},
-            {"id": "compute", "title": "Compute jobs", "intro": "Single compute programs (GPU calculations that draw nothing themselves).", "cards": cards["compute"]},
-            {"id": "materials", "title": "Materials", "intro": "The costliest materials, each removed at the game itself (its draw calls return at once).", "cards": cards["material"]},
+            {"id": "engine", "title": "Engine draw functions", "intro": "The same scene with one of the game's own draw functions switched off at the emulator. These functions were found by reverse engineering the game binary (they are the same functions the Tsushima PC port replaced).", "cards": cards["engine"]},
+            {"id": "compute", "title": "Compute jobs", "intro": "Single compute programs (GPU calculations that draw nothing themselves), removed one at a time. The biggest single jobs cost 40-60 ms of waiting per frame, but removing one only moves the wait to the next job.", "cards": cards["compute"]},
+            {"id": "materials", "title": "Materials", "intro": "The costliest materials, each removed at the game itself (its draw calls return at once). The game keeps no readable names for its materials (a scan behind every material pointer found none), so they are shown by memory address with the pass where they first appeared. No single material is worth more than a few percent.", "cards": cards["material"]},
         ],
     }
     if args.extra:
