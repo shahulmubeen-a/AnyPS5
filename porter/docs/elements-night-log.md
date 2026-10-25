@@ -87,3 +87,6 @@ logs in `yotei-work/runs-best` (run-elN.err.log, plan-elN.txt, shots-elN/).
 - Flake seen once (el14 first try, 35 s after launch, logos): `AGC driver: unsupported PM4 packet type: header
   0x10326b40 at DWORD 408` right after a POP_MARKER whose two dwords replaced a SET_SH_REG header; log kept as
   runs-best/run-el14-crash1.err.log. Rerun was clean.
+- The new committer wait with deferred stores is Recorder::WaitSerial via VulkanDevice::WaitRecorded from the
+  HTILE pre-sync (PresyncDrawDepth, VulkanDevice.cpp ~4600): the committer reads GPU-written depth metadata on the
+  CPU before depth draws. Next on this path: expand HTILE on the GPU (DepthSurface.cpp expandHtileOnGpu, agent P2).
