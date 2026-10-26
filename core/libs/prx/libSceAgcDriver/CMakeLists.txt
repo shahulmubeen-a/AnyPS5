@@ -521,6 +521,18 @@ endif()
 if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(libSceAgcDriver PRIVATE LINKER:--exclude-libs,$<TARGET_FILE_NAME:decoder_png>)
 endif()
+# ANYPS5_AGC_NATIVE (hritikutekar d9901b1c9a; off by default in this tree): the driver's own code for this CPU
+# (-march, FMA contraction off so its float results stay the same), with link-time optimization except under MinGW,
+# whose ld refuses to export LTO-compiled template instantiations. Target flags only: the global flags that key the
+# shader cache, and the recompiler target, are unchanged. A -march=native library runs only on CPUs like this one.
+option(ANYPS5_AGC_NATIVE "Build libSceAgcDriver with -march (and LTO where the linker allows it)" OFF)
+set(ANYPS5_AGC_MARCH "native" CACHE STRING "-march value for ANYPS5_AGC_NATIVE")
+if(ANYPS5_AGC_NATIVE)
+    target_compile_options(libSceAgcDriver PRIVATE -march=${ANYPS5_AGC_MARCH} -ffp-contract=off -fno-semantic-interposition)
+    if(NOT MINGW)
+        set_property(TARGET libSceAgcDriver PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endif()
 
 if(BUILD_TESTING)
     add_test_executable(agc_driver_unsupported_diagnostics_tests tests/UnsupportedDiagnostics.cpp)
