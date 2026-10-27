@@ -1,0 +1,3 @@
+# pf3 (2026-10-27): as pf2 but APS5_TRACE_BUDGET=40000 so the [capsync] lines (which captured words wait for GPU writes, by
+# program and address) and the [dma] lines cover the world, not only the loading phase.
+dsst 150 deferstores on;;switch APS5_STORING_TEMPLATES on

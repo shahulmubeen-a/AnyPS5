@@ -5,7 +5,9 @@ namespace AgcDriver::DriverDetail {
 
 bool Driver::traceBudget() {
     static std::atomic<int> lines{0};
-    return lines.fetch_add(1) < 600;
+    // Porter: APS5_TRACE_BUDGET=<lines> raises the 600-line default (the loading phase alone uses it up).
+    static const int budget = [] { const char* text = std::getenv("APS5_TRACE_BUDGET"); return text != nullptr ? std::atoi(text) : 600; }();
+    return lines.fetch_add(1) < budget;
 }
 
 void Driver::traceCapture(const char* what, std::uint64_t program, std::uint32_t queue, std::span<const ShaderRecompiler::MemoryRegion> regions, double waitedMs) {
