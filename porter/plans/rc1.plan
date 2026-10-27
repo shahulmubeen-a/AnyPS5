@@ -1,0 +1,10 @@
+# rc1 (2026-10-27): APS5_RESOURCE_CACHE_ENTRIES=4096 instead of 1024 (el13: 5.3k resource-cache misses and ~4.8k
+# evictions per 10 s with 1024 entries, each miss a 183 us build on the committer), full game, alternating with
+# deferred stores; compare with el15/el16 base (18.0-19.3 presents per 10 s).
+measure 60
+base-1 75
+ds-1 75 deferstores on
+base-2 75
+ds-2 75 deferstores on
+base-3 75
+ds-3 75 deferstores on

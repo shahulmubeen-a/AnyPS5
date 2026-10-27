@@ -3606,6 +3606,51 @@ bool BdaTemplatesOn() {
     return !RuntimeSwitches::Set(RuntimeSwitch::NoBdaTemplates);
 }
 
+// APS5_STORING_TEMPLATES=1 (runtime switch, Porter): draw builds that store through BDA are templates
+// used one at a time (see noteReusable) instead of a full build per draw.
+bool StoringTemplatesOn() {
+    return RuntimeSwitches::Set(RuntimeSwitch::StoringTemplates) && BdaTemplatesOn();
+}
+
+// Fault buffers for the uses of a storing template that overlap an earlier use (one per use in flight).
+struct UseFaultPool {
+    std::mutex mutex;
+    VkDevice device = VK_NULL_HANDLE;
+    std::vector<std::shared_ptr<Buffer>> free;
+    std::uint64_t made = 0;
+};
+UseFaultPool& useFaultPool() {
+    static auto* pool = new UseFaultPool();
+    return *pool;
+}
+std::shared_ptr<Buffer> TakeUseFault(const Context& context) {
+    auto& pool = useFaultPool();
+    {
+        std::lock_guard lock(pool.mutex);
+        if (pool.device != context.device) {
+            pool.free.clear();
+            pool.device = context.device;
+        }
+        if (!pool.free.empty()) {
+            auto buffer = std::move(pool.free.back());
+            pool.free.pop_back();
+            return buffer;
+        }
+        ++pool.made;
+    }
+    const MemoryStats::OwnerScope memStatsOwner(MemoryStats::Owner::Bda);
+    auto buffer = std::make_shared<Buffer>(context, ShaderRecompiler::BdaAbi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(buffer->Bytes().data(), 0, buffer->Bytes().size());
+    return buffer;
+}
+void ReturnUseFault(std::shared_ptr<Buffer> buffer) {
+    constexpr std::size_t PoolLimit = 512;
+    BdaResources::ClearFaultBuffer(*buffer);
+    auto& pool = useFaultPool();
+    std::lock_guard lock(pool.mutex);
+    if (pool.free.size() < PoolLimit) pool.free.push_back(std::move(buffer));
+}
+
 void CompleteSnapshotWrites(std::span<const GuestMemorySnapshot> snapshots) {
     auto* recorder = Recorder::Active();
     if (recorder == nullptr || Recorder::InCompletion()) return;
@@ -3633,7 +3678,11 @@ void ShaderResources::noteReusable() {
     bdaTemplate = false;
     sharedUses = false;
     if (storageTableBindings[0] != std::numeric_limits<std::size_t>::max() || storageTableBindings[1] != std::numeric_limits<std::size_t>::max()) return refuse(TemplateOutcome::StorageTable);
-    const bool templated = usesBda && drawBuild && bdaReadOnly && BdaTemplatesOn();
+    // Porter (APS5_STORING_TEMPLATES=1): a draw build that stores through BDA is a template too, used one at
+    // a time (its fault buffer and written-page record are per build), with per-use descriptor sets for
+    // changed data words like a read-only template. Yotei rebuilds ~5,100 such draws per 10 s at ~350 us.
+    const bool storingTemplate = !bdaReadOnly && StoringTemplatesOn();
+    const bool templated = usesBda && drawBuild && (bdaReadOnly || storingTemplate) && BdaTemplatesOn();
     const bool addressBased = usesBda && drawBuild && (AddressReuseEnabled() || templated);
     if (guestMemory.HasCopiedWrites()) return refuse(TemplateOutcome::CopiedWrites);
     if ((!addressBased && (HoldsLease() || usesBda)) || (bda != nullptr && LoopGuardEnabled())) return refuse(TemplateOutcome::LoopGuard);
@@ -3668,7 +3717,8 @@ void ShaderResources::noteReusable() {
     reusable = true;
     addressReuse = addressBased;
     bdaTemplate = templated;
-    sharedUses = templated && addressWrites.empty() && guestMemory.Writes().empty() && !guestMemory.HasGpuCopies() && !guestMemory.HasCopiedWrites() && std::none_of(storageWritten.begin(), storageWritten.end(), [](bool written) { return written; });
+    // A storing template never shares uses: two uses in flight would merge their written-page records.
+    sharedUses = templated && bdaReadOnly && addressWrites.empty() && guestMemory.Writes().empty() && !guestMemory.HasGpuCopies() && !guestMemory.HasCopiedWrites() && std::none_of(storageWritten.begin(), storageWritten.end(), [](bool written) { return written; });
     refuse(sharedUses ? TemplateOutcome::Shared : TemplateOutcome::NotShared);
 }
 
@@ -3723,7 +3773,7 @@ bool ShaderResources::NeverReusable(std::span<const CompiledShader> shaders) {
         return shader.program != nullptr && std::any_of(shader.program->bindings.begin(), shader.program->bindings.end(), [loopGuard, addressReuse](const ShaderRecompiler::DescriptorBinding& binding) { return (binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable && !addressReuse) || (loopGuard && binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer); });
     });
     if (!never || addressReuse || loopGuard || !BdaTemplatesOn()) return never;
-    return StagesStoreThroughAddresses(shaders);
+    return StagesStoreThroughAddresses(shaders) && !StoringTemplatesOn();
 }
 
 // APS5_PROFILE_DRAW: the per-device descriptor caches' counters, every 10 s.
@@ -4646,7 +4696,10 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
     if (!reusable) return refuse(AddressReuse::NotReusable);
     const bool shared = SharesUses();
     if (bdaTemplate && !BdaTemplatesOn()) return refuse(AddressReuse::NotReusable);
-    if (!shared && InUse()) return refuse(AddressReuse::InUse);
+    if (!shared && InUse()) {
+        if (!(bdaTemplate && !bdaReadOnly && StoringTemplatesOn() && bda != nullptr)) return refuse(AddressReuse::InUse);
+        if (pendingUseFault == nullptr) pendingUseFault = TakeUseFault(context);
+    }
     if (!bdaTemplate) {
         CompleteSnapshotWrites(snapshots);
         if (!guestMemory.SameSnapshots(snapshots)) return refuse(AddressReuse::Snapshots);
@@ -7006,8 +7059,9 @@ std::size_t ShaderResources::DrawUploadLimit() {
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly) const {
     if (_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) return {};
+    const auto useFault = pendingUseFault;
     if (usesBda) {
-        if (!bdaTemplate || moved.empty()) return {};
+        if (!bdaTemplate || (moved.empty() && useFault == nullptr)) return {};
         movedOnly = true;
         CountPerUseAddressSet();
     }
@@ -7029,6 +7083,11 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     };
     for (std::size_t index = 0; index < allocations.size(); ++index) {
         const auto& item = allocations[index];
+        if (useFault != nullptr && !item.guest && item.role == ShaderRecompiler::DescriptorRole::FaultBuffer) {
+            selected.push_back(index);
+            keep({0, useFault, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes});
+            continue;
+        }
         const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
         if (override != moved.end() && !override->words.empty()) {
             constexpr std::size_t MovedWordBufferSlots = 8;
@@ -7272,10 +7331,11 @@ void ShaderResources::CheckFaults(std::uint64_t shaderAddress) const {
     if (bda) bda->CheckFault(shaderAddress);
 }
 
-std::shared_ptr<const void> ShaderResources::BeginUse() {
+std::shared_ptr<const ShaderResources::UseHold> ShaderResources::BeginUse() {
     if (!addressReuse) return {};
-    struct Use {
-        Use(std::shared_ptr<std::atomic<std::uint32_t>> counter, std::shared_ptr<const void> hold, bool reusedSpace) : uses(std::move(counter)), space(std::move(hold)), reused(reusedSpace) {
+    struct Use : UseHold {
+        Use(std::shared_ptr<std::atomic<std::uint32_t>> counter, std::shared_ptr<const void> hold, bool reusedSpace, std::shared_ptr<Buffer> useFault) : uses(std::move(counter)), space(std::move(hold)), reused(reusedSpace) {
+            fault = std::move(useFault);
             uses->fetch_add(1, std::memory_order_acq_rel);
             if (reused) HoldReusedSpace(true);
         }
@@ -7287,20 +7347,23 @@ std::shared_ptr<const void> ShaderResources::BeginUse() {
         std::shared_ptr<const void> space;
         bool reused;
     };
-    return std::make_shared<const Use>(usesInFlight, guestMemory.SpaceHold(), std::exchange(reuseProved, false));
+    return std::make_shared<const Use>(usesInFlight, guestMemory.SpaceHold(), std::exchange(reuseProved, false), std::exchange(pendingUseFault, nullptr));
 }
 
-void ShaderResources::CompleteUse() {
+void ShaderResources::CompleteUse(const UseHold* hold) {
     if (!addressReuse) {
         CheckFaults();
         return;
     }
+    auto useFault = hold != nullptr ? hold->fault : nullptr;
     try {
-        CheckFaults();
+        if (useFault != nullptr && bda != nullptr) bda->CheckFault(0, useFault.get());
+        else CheckFaults();
     } catch (...) {
         reusable = false;
         throw;
     }
+    if (useFault != nullptr) ReturnUseFault(std::move(useFault));
     if (SkipWriteBack()) return;
     for (const auto& [begin, end] : addressWrites) GuestMemory::MarkWritten(begin, static_cast<std::size_t>(end - begin));
 }

@@ -1,0 +1,9 @@
+# dp1 (2026-10-27): APS5_DRAW_PIPELINE=1 (draw finisher thread + epoch proofs, never tried on Yotei) on the full game,
+# alternating with deferred stores; compare with el15/el16 base (18.0-19.3 presents per 10 s without it).
+measure 60
+base-1 75
+ds-1 75 deferstores on
+base-2 75
+ds-2 75 deferstores on
+base-3 75
+ds-3 75 deferstores on

@@ -1,0 +1,10 @@
+# rc4 (2026-10-27): fixed APS5_RESOURCE_CACHE_ENTRIES=4096 (not the adaptive cache of rc2, which was 25 % slower): pf1 showed
+# 8.7k resource-cache misses per 10 s with storing templates on (5.2k builds x 185 us + 3.6k BDA x 276 us on the committer),
+# while the Deferred pass still makes the worker wait ~0.9 s per 10 s for room. Storing templates + deferred stores on top.
+measure 60
+base-1 75
+st-1 75 switch APS5_STORING_TEMPLATES on
+dsst-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+base-2 75
+st-2 75 switch APS5_STORING_TEMPLATES on
+dsst-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on

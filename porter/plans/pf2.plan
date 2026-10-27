@@ -1,0 +1,4 @@
+# pf2 (2026-10-27): profiled run of deferred stores + storing templates with APS5_TRACE_CAPSYNC=1 (which captured regions
+# wait for GPU writes, with their writers) and the new [dma] lines (large DMA_DATA copies: path, sync wait, time), to
+# attribute the async queues' (q30/q38/q20) CPU-side GPU waits that sit on the frame's critical chain.
+dsst 200 deferstores on;;switch APS5_STORING_TEMPLATES on

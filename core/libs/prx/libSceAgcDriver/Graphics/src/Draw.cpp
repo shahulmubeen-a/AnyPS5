@@ -2314,7 +2314,7 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
         if (resources->Reusable()) {
             recorder.OnComplete([resources, hold = resources->BeginUse()]() mutable {
                 const auto held = std::move(hold);
-                resources->CompleteUse();
+                resources->CompleteUse(held.get());
             });
         } else {
             recorder.OnComplete([resources] { resources->WriteBackBuffers(); });

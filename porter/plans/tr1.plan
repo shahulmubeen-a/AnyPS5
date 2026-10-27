@@ -1,0 +1,3 @@
+# tr1 (2026-10-27): 8-frame timeline trace (APS5_TRACE_FRAMES=2950:8) of deferred stores + storing templates; the dsst step
+# starts at about present 2600 and runs 300 s.
+dsst 300 deferstores on;;switch APS5_STORING_TEMPLATES on

@@ -617,13 +617,19 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
         throw std::runtime_error(where + message + describeIndirectSource());
     };
     phaseTiming.Phase(PhaseSnapshots);
+    // Porter: a dispatch item that clears a depth plane installs the same DepthPlaneClear overwrite the direct
+    // path does (below, :781), on the committer around its Dispatch; without it the next depth draw saw a plain GPU
+    // write and refreshed the whole plane from memory (pf1 sampler: DepthSurfaceView -> SyncFromMemory -> refresh
+    // -> FlushDepthPlanes, ~15 % of the committer's busy time).
+    const auto itemClear = indirectArguments == 0 && !partialLastGroup && (pipelined || missItem) ? Graphics::MatchStorageImageClear(std::span(snapshot.code).subspan(codeOffset), userData, compute, groups) : std::nullopt;
+    const bool itemClearsDepth = itemClear.has_value() && [&] { const auto clearAddress = Graphics::StorageImageClearAddress(*itemClear); return clearAddress != 0 && Graphics::DepthSurfaceAt(clearAddress); }();
 
     if (pipelined) {
         const auto recipe = keepVariant->recipe.load(std::memory_order_acquire);
         const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
         const auto queueId = submission.queue;
         itemCommits.fetch_add(1, std::memory_order_relaxed);
-        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, snapshots = std::move(snapshots), captured = std::move(captured), liveWords = std::move(liveWords), groups, address, queueId, recipe, keepVariant, dataHit, epoch, htileClearCompletion, htileMask] {
+        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, snapshots = std::move(snapshots), captured = std::move(captured), liveWords = std::move(liveWords), groups, address, queueId, recipe, keepVariant, dataHit, epoch, htileClearCompletion, htileMask, itemClear, itemClearsDepth] {
             DrawPipeline::FollowEpoch(epoch);
             GuestMemory::SetCurrentPacket(0x15, queueId);
             const auto& compiledCommit = *result;
@@ -638,6 +644,8 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
                     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Dispatch);
                     std::lock_guard gpuLock(GuestMemory::GpuMutex());
                     recordLabelsForPacket(localDevice.get(), queueId);
+                    std::optional<Graphics::DepthPlaneClear> depthPlaneClear;
+                    if (itemClearsDepth) depthPlaneClear.emplace(*itemClear);
                     if (noteWrites && writerKeyedEvidence() && !writersNoted) {
                         noteWrittenBuffers(address, queueId, compiledCommit);
                         writersNoted = true;
@@ -687,21 +695,59 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
         const auto queueId = submission.queue;
         auto attachTo = keepVariant != nullptr ? keepVariant : attachVariant;
         missItemCommits.fetch_add(1, std::memory_order_relaxed);
-        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, captured = std::move(captured), liveWords = std::move(liveWords), capture, shaderMemory, registeredShader, htileMask, htileClearCompletion, groups, address, queueId, dispatchThreads, attachTo = std::move(attachTo), keepVariant, dataHit, epoch] {
+        // Porter: the miss item's PrepareDispatch (stage A resources, pre-sync, pipeline objects) runs on the
+        // preparer thread ahead of the committer, as a draw's PrepareDraw does (Draw.cpp, PrepareSlot); the
+        // commit takes the result or prepares itself when the preparer did not get to it. PrepareDispatch is
+        // made to run off the lock: the dispatch revalidates a cached build under the mutex and work recorded
+        // after the pre-sync falls back to the locked wait. APS5_NO_MISS_ITEM_PREPARE=1 turns it off.
+        static const bool prepareMissItems = std::getenv("APS5_NO_MISS_ITEM_PREPARE") == nullptr;
+        struct PreparedMiss {
+            std::shared_ptr<PreparedDispatch> prepared;
+        };
+        auto heldCaptured = std::make_shared<const std::vector<ShaderRecompiler::MemoryRegion>>(std::move(captured));
+        const auto snapshotsOf = [](const std::vector<ShaderRecompiler::MemoryRegion>& regions) {
+            std::vector<Graphics::GuestMemorySnapshot> snapshots;
+            snapshots.reserve(regions.size());
+            for (const auto& region : regions) snapshots.push_back({region.guestAddress, region.bytes});
+            return snapshots;
+        };
+        auto slot = prepareMissItems ? std::make_shared<DrawPipeline::PrepareSlot>() : nullptr;
+        DrawPipeline::Prepare prepare;
+        if (slot != nullptr) {
+            prepare = [slot, device = localDevice, result = compiledResult, heldCaptured, snapshotsOf, dispatchThreads, address, queueId, epoch] {
+                if (!slot->Begin()) return;
+                auto prepared = std::make_shared<PreparedMiss>();
+                try {
+                    DrawPipeline::FollowEpoch(epoch);
+                    GuestMemory::SetCurrentPacket(0x15, queueId);
+                    const auto snapshots = snapshotsOf(*heldCaptured);
+                    prepared->prepared = device->PrepareDispatch(*result, snapshots, dispatchThreads, address);
+                } catch (...) {
+                    prepared->prepared = nullptr;
+                }
+                slot->Finish(std::move(prepared));
+            };
+        }
+        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, heldCaptured, snapshotsOf, liveWords = std::move(liveWords), capture, shaderMemory, registeredShader, htileMask, htileClearCompletion, groups, address, queueId, dispatchThreads, attachTo = std::move(attachTo), keepVariant, dataHit, epoch, slot, itemClear, itemClearsDepth] {
             DrawPipeline::FollowEpoch(epoch);
             GuestMemory::SetCurrentPacket(0x15, queueId);
             const auto& compiledCommit = *result;
-            std::vector<Graphics::GuestMemorySnapshot> commitSnapshots;
-            commitSnapshots.reserve(captured.size());
-            for (const auto& region : captured) commitSnapshots.push_back({region.guestAddress, region.bytes});
+            const auto& captured = *heldCaptured;
+            auto commitSnapshots = snapshotsOf(captured);
             const bool noteWrites = writeEvidenceEnabled() || traceCapSync();
             try {
-                auto prepared = localDevice->PrepareDispatch(compiledCommit, commitSnapshots, dispatchThreads, address);
+                std::shared_ptr<PreparedDispatch> prepared;
+                if (slot != nullptr) {
+                    if (auto ahead = std::static_pointer_cast<PreparedMiss>(slot->Take()); ahead != nullptr) prepared = std::move(ahead->prepared);
+                }
+                if (prepared == nullptr) prepared = localDevice->PrepareDispatch(compiledCommit, commitSnapshots, dispatchThreads, address);
                 std::shared_ptr<const Recipe> builtRecipe;
                 {
                     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Dispatch);
                     std::lock_guard gpuLock(GuestMemory::GpuMutex());
                     recordLabelsForPacket(localDevice.get(), queueId);
+                    std::optional<Graphics::DepthPlaneClear> depthPlaneClear;
+                    if (itemClearsDepth) depthPlaneClear.emplace(*itemClear);
                     if (noteWrites && writerKeyedEvidence()) noteWrittenBuffers(address, queueId, compiledCommit);
                     localDevice->Dispatch(compiledCommit, groups[0], groups[1], groups[2], commitSnapshots, address, std::move(prepared), htileClearCompletion.has_value() ? nullptr : (attachTo != nullptr ? &builtRecipe : nullptr), htileClearCompletion);
                     if (htileMask.address != 0) localDevice->NoteHtileMask(htileMask.address, htileMask.bytes, htileMask.mask, htileMask.value);
@@ -723,7 +769,7 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
                 std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
                 throw std::runtime_error(where + std::string(error.what()));
             }
-        }, std::move(itemWrites));
+        }, std::move(itemWrites), 0, {}, {}, std::move(prepare));
         if (DrainAfterDispatchItems()) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
         ReportDispatchItems(profile);
         return;

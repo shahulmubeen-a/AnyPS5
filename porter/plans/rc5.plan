@@ -1,0 +1,10 @@
+# rc5 (2026-10-27): fixed 1024 resource cache (4096 in rc4 pinned the VRAM full: 14.5 GB used, texture cache budget
+# shrinking, 0.3 fps). Build with per-use fault buffers for storing templates and the depth-plane clear overwrite on
+# dispatch items. Storing templates and deferred stores, 2 rounds.
+measure 60
+base-1 75
+st-1 75 switch APS5_STORING_TEMPLATES on
+dsst-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+base-2 75
+st-2 75 switch APS5_STORING_TEMPLATES on
+dsst-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on

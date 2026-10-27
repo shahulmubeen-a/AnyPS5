@@ -1,0 +1,12 @@
+# rc3 (2026-10-27): as rc2 but with the README's fixed APS5_RESOURCE_CACHE_ENTRIES=1024 again (rc2 with the adaptive
+# cache ran 13.9-14.5 presents per 10 s from the start, against 18.4-19.3 in el16/dp1). Tests the new runtime switch
+# APS5_STORING_TEMPLATES (draws that store through BDA as one-use templates) with and without deferred stores.
+measure 60
+base-1 75
+st-1 75 switch APS5_STORING_TEMPLATES on
+ds-1 75 deferstores on
+dsst-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+base-2 75
+st-2 75 switch APS5_STORING_TEMPLATES on
+ds-2 75 deferstores on
+dsst-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on

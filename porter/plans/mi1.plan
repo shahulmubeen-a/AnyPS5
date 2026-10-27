@@ -1,0 +1,9 @@
+# mi1 (2026-10-27): on top of deferred stores + storing templates (dsst): dispatch miss items, now with their
+# PrepareDispatch on the preparer thread (APS5_NO_MISS_ITEM_PREPARE=1 turns that off), 2 rounds.
+measure 60
+base-1 75
+dsst-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+dsstm-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on;;switch APS5_PIPELINE_DISPATCH_MISSES on
+base-2 75
+dsst-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+dsstm-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on;;switch APS5_PIPELINE_DISPATCH_MISSES on

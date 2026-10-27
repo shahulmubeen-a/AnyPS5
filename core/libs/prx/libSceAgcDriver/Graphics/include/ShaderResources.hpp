@@ -392,8 +392,14 @@ public:
     void CheckFaults(std::uint64_t shaderAddress = 0) const;
     bool InUse() const { return usesInFlight->load(std::memory_order_acquire) != 0; }
     bool ReusesAddressSpace() const { return addressReuse; }
-    std::shared_ptr<const void> BeginUse();
-    void CompleteUse();
+    // Porter (APS5_STORING_TEMPLATES): a use of a storing template while an earlier use is in flight
+    // takes a fault buffer of its own (UseHold::fault, bound through the use's descriptor set), so the
+    // uses' written-page records never merge; CompleteUse(hold) reads that buffer.
+    struct UseHold {
+        std::shared_ptr<Buffer> fault;
+    };
+    std::shared_ptr<const UseHold> BeginUse();
+    void CompleteUse(const UseHold* hold = nullptr);
     // Address-table template (APS5_NO_BDA_TEMPLATES unset): a read-only address-table draw build
     // (no store through BDA, no written buffer or image, no GPU copies) that later draws may use
     // while earlier uses are still in flight; each use takes its own descriptor set for changed data
@@ -755,6 +761,9 @@ private:
     bool bdaTemplate = false;
     bool sharedUses = false;
     bool reuseProved = false;
+    // The fault buffer the next use binds and completes with (taken in Revalidate, bound by
+    // PrepareDrawBindings, moved into the use by BeginUse).
+    mutable std::shared_ptr<Buffer> pendingUseFault;
     std::shared_ptr<std::atomic<std::uint32_t>> usesInFlight = std::make_shared<std::atomic<std::uint32_t>>(0u);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> addressWrites;
     std::vector<DirectRegion> directRegions;

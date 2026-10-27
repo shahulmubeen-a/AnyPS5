@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -177,7 +178,11 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 std::lock_guard gpuLock(GuestMemory::GpuMutex());
                 if (const auto localDevice = device.Load()) {
                     recordDeferredLabels(localDevice.get(), submission.queue);
+                    const auto copyStart = std::chrono::steady_clock::now();
                     const auto outcome = localDevice->CopyBuffer(copy->destination, copy->source, copy->bytes, 0, std::numeric_limits<std::size_t>::max(), 0, 0, submission.queue, [](std::span<const std::byte>, std::uint64_t) {});
+                    // Porter: [dma] per large DMA_DATA copy (APS5_PROFILE_DRAW, first 600 trace lines): path, sync wait, time.
+                    static const bool profileDma = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+                    if (profileDma && traceBudget()) std::fprintf(stderr, "[dma] q0x%x copy 0x%llx <- 0x%llx %zu bytes: path %d reason %d synced %d (%.1f ms) in %.1f ms\n", submission.queue, static_cast<unsigned long long>(copy->destination), static_cast<unsigned long long>(copy->source), copy->bytes, outcome.path, static_cast<int>(outcome.reason), outcome.synced ? 1 : 0, outcome.syncMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStart).count());
                     if (outcome.path == 1 || outcome.path == 3) {
                         wroteOnGpu = true;
                         drained = false;
@@ -204,6 +209,10 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
             }
         }
         if (drained) ++storesDrained;
+        if (drained && opcode == 0x50 && copy.has_value()) {
+            static const bool profileDma = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+            if (profileDma && traceBudget()) std::fprintf(stderr, "[dma] q0x%x copy 0x%llx <- 0x%llx %zu bytes: drained (CPU copy by the packet)\n", submission.queue, static_cast<unsigned long long>(copy->destination), static_cast<unsigned long long>(copy->source), copy->bytes);
+        }
     }
 
     static const bool drawDrain = std::getenv("APS5_DRAW_DRAIN") != nullptr;

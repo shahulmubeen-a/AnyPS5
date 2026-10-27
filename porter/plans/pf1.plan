@@ -1,0 +1,9 @@
+# pf1 (2026-10-27): profiled (APS5_PROFILE_DRAW/GPU) and sampled (worker + committer) run: why APS5_STORING_TEMPLATES
+# did not lower the committer's busy time in rc3 ([rescache] address-based proofs/refusals, [bda-template]), the
+# dispatch miss items with the preparer, and the symbolized committer/worker profile of the hit path
+# (collapsed_report.py --libs D:\Games\AnyPS5\PPSA26344-elem\libs).
+measure 30
+base 100
+st 100 switch APS5_STORING_TEMPLATES on
+dsst 100 deferstores on;;switch APS5_STORING_TEMPLATES on
+dsstm 100 deferstores on;;switch APS5_STORING_TEMPLATES on;;switch APS5_PIPELINE_DISPATCH_MISSES on

@@ -1,0 +1,13 @@
+# rc2 (2026-10-27): resource cache adaptive (APS5_RESOURCE_CACHE_ENTRIES unset: grows 1024 -> 16384 when evicted keys
+# return; el13 had ~5k misses and ~4.8k evictions per 10 s at the fixed 1024) and the new runtime switch
+# APS5_STORING_TEMPLATES (draws that store through BDA become one-use templates instead of a ~350 us build each,
+# ~5.1k per 10 s), with and without deferred stores, 2 rounds. Base of this run = adaptive cache only.
+measure 60
+base-1 75
+st-1 75 switch APS5_STORING_TEMPLATES on
+ds-1 75 deferstores on
+dsst-1 75 deferstores on;;switch APS5_STORING_TEMPLATES on
+base-2 75
+st-2 75 switch APS5_STORING_TEMPLATES on
+ds-2 75 deferstores on
+dsst-2 75 deferstores on;;switch APS5_STORING_TEMPLATES on

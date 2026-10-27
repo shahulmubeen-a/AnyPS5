@@ -17,7 +17,10 @@ public:
     BdaResources(const Context& context, const GuestBufferMemory& memory);
     VkDescriptorBufferInfo Table() const;
     VkDescriptorBufferInfo Fault() const;
-    void CheckFault(std::uint64_t shaderAddress = 0) const;
+    // `use`: a template use's own fault buffer (Porter, see ShaderResources::TakeUseFault); null = this build's.
+    void CheckFault(std::uint64_t shaderAddress = 0, Buffer* use = nullptr) const;
+    // Bytes of a fresh fault buffer for a template use: the written-page record and the SRT guard cleared.
+    static void ClearFaultBuffer(Buffer& buffer);
     struct ImageTableFaults {
         std::uint32_t stage = 0;
         std::uint64_t shader = 0;
@@ -56,8 +59,8 @@ private:
     // The page table is read-only to the shader, so consecutive builds mapping the same ranges to the
     // same device addresses share one buffer while one of them is alive (see the table cache in
     // BdaResources.cpp, which refers to it weakly).
-    void markWrittenPages() const;
-    void checkSrtGuard() const;
+    void markWrittenPages(Buffer& buffer) const;
+    void checkSrtGuard(Buffer& buffer) const;
     std::shared_ptr<Buffer> table;
     std::unique_ptr<Buffer> fault;
     std::size_t tableBytes = 0;
