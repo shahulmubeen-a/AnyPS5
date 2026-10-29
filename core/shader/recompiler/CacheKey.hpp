@@ -328,6 +328,7 @@ private:
         append(key, value.spannedWaves);
         append(key, value.fusedFma);
         append(key, value.nativeMixF16);
+        append(key, value.nativeF16Fma);
         append(key, value.robustBufferAccess2);
         append(key, value.float32FlushToZero);
         append(key, value.waveLdsMemoryBarriers);
