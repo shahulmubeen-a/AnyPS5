@@ -189,6 +189,8 @@ struct SpirvEmitterState {
     std::uint32_t bdaFaultFunction = 0;
     bool nativeF16ModesEmitted = false;
     bool f16DenormPreserveEmitted = false;
+    // DenormPreserve 64 declared (module setup or EmitF16DenormPreserve): declared once.
+    bool f64DenormPreserveEmitted = false;
     std::uint32_t dot2F32F16Function = 0;
     std::uint32_t reciprocalCorrectionFunction = 0;
     std::array<std::uint32_t, 3> reciprocalTables {};
