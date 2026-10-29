@@ -327,6 +327,7 @@ private:
         append(key, value.bindlessImages);
         append(key, value.spannedWaves);
         append(key, value.fusedFma);
+        append(key, value.nativeMixF16);
         append(key, value.robustBufferAccess2);
         append(key, value.float32FlushToZero);
         append(key, value.waveLdsMemoryBarriers);

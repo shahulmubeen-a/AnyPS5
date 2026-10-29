@@ -29,6 +29,7 @@ struct SpirvTargetOptions {
     bool spannedWaves = false;
     bool bindlessImages = false;
     bool fusedFma = false;
+    bool nativeMixF16 = false;
     // ShaderComputeStageInfo::singleWorkgroup of the request.
     bool singleWorkgroup = false;
     bool robustBufferAccess2 = false;
