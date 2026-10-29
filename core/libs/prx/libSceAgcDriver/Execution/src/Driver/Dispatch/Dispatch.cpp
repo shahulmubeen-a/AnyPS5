@@ -371,7 +371,10 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
     std::shared_ptr<const ShaderRecompiler::ResourceCapture> capture;
 
     static const bool traceCache = std::getenv("APS5_TRACE_DISPATCH_CACHE") != nullptr;
-    if (traceCache) {
+    // Porter: APS5_TRACE_DISPATCH_CACHE_FROM=<present> starts the key-change reports at that present (the loading
+    // screens use up the 200 reports otherwise).
+    static const std::uint64_t traceCacheFrom = [] { const char* text = std::getenv("APS5_TRACE_DISPATCH_CACHE_FROM"); return text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull; }();
+    if (traceCache && Graphics::Recorder::Presents() >= traceCacheFrom) {
         std::lock_guard traceLock(dispatchCacheMutex);
         struct Last { std::vector<std::uint32_t> userData; std::map<std::uint32_t, std::uint32_t> shader; std::uint64_t key; };
         static std::map<std::uint64_t, Last> last;
@@ -395,7 +398,7 @@ void Driver::dispatchAttempt(QueueState& queue, std::span<const std::uint32_t> p
                 }
             }
             ++reports;
-            std::fprintf(stderr, "[dispatch-cache] 0x%llx key changed:%s\n", static_cast<unsigned long long>(address), what.c_str());
+            std::fprintf(stderr, "[dispatch-cache] 0x%llx queue 0x%x key changed:%s\n", static_cast<unsigned long long>(address), submission.queue, what.c_str());
         }
         previous.userData = userData;
         previous.shader = std::map<std::uint32_t, std::uint32_t>(queue.shader.begin(), queue.shader.end());

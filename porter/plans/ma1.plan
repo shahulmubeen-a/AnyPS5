@@ -1,0 +1,16 @@
+# ma1 (2026-10-30 night): main menu (benchmark scene) on the current elem driver, profiled (APS5_PROFILE_DRAW).
+# A/B at the menu: q0 drains at dispatch-cache misses (miss items), deferred stores (no label readbacks of
+# deferrable storage textures), and a GPU-sensitivity probe: six single-dispatch programs with ~22 ms of GPU time
+# per frame but ~1 ms of CPU time skipped (FSR3 accumulate 0x141ecbf00, 0x8000208b00, water lighting 0x80003e8700,
+# screen-space shadows 0x80003ae600, CS lights 0x8000310700, 0x801f6d2900; mt2 [gputime]). If the frame shortens by
+# about that much, GPU time is on the critical path. APS5_LANE_SERIALIZE is left out: switched on live it deadlocked
+# the GPU timelines in wt1.
+base-0 60
+miss-1 60 switch APS5_PIPELINE_DISPATCH_MISSES on
+ds-1 60 deferstores on
+gpu6-1 60 prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+base-1 60
+miss-2 60 switch APS5_PIPELINE_DISPATCH_MISSES on
+ds-2 60 deferstores on
+gpu6-2 60 prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+base-2 60

@@ -578,6 +578,7 @@ void DrawPipeline::run() {
                 ~CommitTagScope() { Elements::SetCommitTag(nullptr); }
             } commitTag{&element};
             if (commit != nullptr) (*commit)();
+            if (commit != nullptr) Elements::DelayCommit();
             if (!isDraw) GuestMemory::BreakProofs();
         } catch (const std::exception& error) {
             if (!SkipFailedWork("pipelined draw", error)) {

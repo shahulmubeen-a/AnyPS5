@@ -13,7 +13,8 @@ param(
     [string]$ExtraEnv = '',
     [string]$Unset = '',
     [string]$Plan = '',
-    [int]$PlanStartAfter = 60
+    [int]$PlanStartAfter = 60,
+    [int]$StayAtMenu = 0
 )
 # One Yotei run on the element-work runtime (make-runtime.ps1): zip-b save, the yotei/best README environment of
 # 161097737 plus skip-failed-work and frame dumps every $DumpEvery presents, 1080p-fixed app.exe.
@@ -27,6 +28,8 @@ param(
 # held for <seconds>; the presents counted over the step's second half and the newest frame dump are recorded in
 # runs-best\plan-<Tag>.txt and runs-best\shots-<Tag>\<label>.bmp. A label "base" with no control lines measures the
 # unchanged scene. The world phase ends when the plan ends (or after $WorldSeconds without a plan).
+# $StayAtMenu > 0 skips CONTINUE: after the popups the run stays at the main menu (the benchmark scene) for
+# $StayAtMenu s, or runs the plan there.
 # Start it outside Claude's shell (Win32_Process Create), so the background-shell reaper cannot kill the game.
 $tools = 'C:\Users\Mubeen\Documents\Projects\yotei-work\tools'
 $runs = 'C:\Users\Mubeen\Documents\Projects\yotei-work\runs-best'
@@ -89,9 +92,15 @@ try {
     }
     Note "menu at $($f -join ',')"
     Start-Sleep -Seconds $MenuHold
-    $steps = @(for ($i = 0; $i -lt $PopupPresses; ++$i) { 'cross:300:6000' }) + 'cross:300:0'
-    & (Join-Path $tools 'pad-send.ps1') -File $pad -Steps $steps | ForEach-Object { Note "$_" }
-    Note 'continue pressed, world phase'
+    $steps = @(for ($i = 0; $i -lt $PopupPresses; ++$i) { 'cross:300:6000' })
+    if ($StayAtMenu -le 0) { $steps += 'cross:300:0' }
+    if ($steps.Count -gt 0) { & (Join-Path $tools 'pad-send.ps1') -File $pad -Steps $steps | ForEach-Object { Note "$_" } }
+    if ($StayAtMenu -gt 0) {
+        $WorldSeconds = $StayAtMenu
+        Note 'popups dismissed, menu phase'
+    } else {
+        Note 'continue pressed, world phase'
+    }
     if (-not $Plan) {
         $end = (Get-Date).AddSeconds($WorldSeconds)
         while ((Get-Date) -lt $end) {

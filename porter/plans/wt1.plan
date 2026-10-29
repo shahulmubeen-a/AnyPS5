@@ -1,0 +1,11 @@
+# wt1 (2026-10-29 night): world at HOME on the current elem driver, profiled (APS5_PROFILE_DRAW) with one trace window
+# (APS5_TRACE_FRAMES=2850:16, inside base-0) and frame-time intervals (APS5_TRACE_SUMMARY_EVERY=10, APS5_TRACE_BENCH=1).
+# A/B of the GPU concurrency we already have (APS5_LANE_SERIALIZE on = the async lane waits for lane 0, i.e. serial)
+# and of the q0 drains at dispatch-cache misses (APS5_PIPELINE_DISPATCH_MISSES on = miss items, no drain).
+base-0 240
+lser-1 100 switch APS5_LANE_SERIALIZE on
+miss-1 100 switch APS5_PIPELINE_DISPATCH_MISSES on
+base-1 100
+lser-2 100 switch APS5_LANE_SERIALIZE on
+miss-2 100 switch APS5_PIPELINE_DISPATCH_MISSES on
+base-2 100

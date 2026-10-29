@@ -1,0 +1,10 @@
+# wc2 (2026-10-30 night): world at HOME with deferred stores on in every step (the proposal's first half), unprofiled,
+# causal delays on top: is the committer still the critical path once its GPU waits are gone (wd1: committer fence
+# waits 105 -> 5 ms per frame with deferstores, but the frame only -37 ms)?
+ds-0 100 deferstores on
+dscd-1 100 deferstores on;;commitdelay 20
+dsq0-1 100 deferstores on;;q0delay 20
+ds-1 100 deferstores on
+dscd-2 100 deferstores on;;commitdelay 20
+dsq0-2 100 deferstores on;;q0delay 20
+ds-2 100 deferstores on

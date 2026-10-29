@@ -1,0 +1,7 @@
+# wd1 (2026-10-30 night): world at HOME, profiled (APS5_PROFILE_DRAW), base then deferred stores, to measure in
+# ms per frame how much of the committer's GPU waiting is left once the label read-backs are deferred (the depth-plane
+# half of the proposal), from the [recorder] sync sites and per-thread fence waits.
+base-0 150
+ds-1 150 deferstores on
+base-1 150
+ds-2 150 deferstores on

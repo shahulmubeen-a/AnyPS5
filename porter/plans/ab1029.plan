@@ -1,0 +1,10 @@
+# ab1029 (2026-10-29): unchanged scene at HOME, six 75 s windows after a 60 s settle. Same plan for every arm:
+# A = porter/elements runtime (PPSA26344-elem), B = Celegans12 yotei/best 358458a0e3, C = B + hritikutekar's
+# perf set as cherry-picked by Celegans12 (backup/np-hritik), on yotei/hritik-perf.
+measure 60
+base-1 75
+base-2 75
+base-3 75
+base-4 75
+base-5 75
+base-6 75

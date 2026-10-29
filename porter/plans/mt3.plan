@@ -1,0 +1,3 @@
+# mt3 (2026-10-30 night): menu with deferred stores on from the popup onward, profiled + one trace window
+# (APS5_TRACE_FRAMES=2500:40) inside it: what the CPU does while the GPU idles once the label readbacks are gone.
+ds 300 deferstores on

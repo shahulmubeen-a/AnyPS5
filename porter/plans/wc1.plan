@@ -1,0 +1,10 @@
+# wc1 (2026-10-30 night): causal profiling in the world at HOME (unprofiled). commitdelay 20: +20 us per commit
+# (~2,870 commits per frame = +57 ms per frame); q0delay 20: +20 us per queue-0 draw or dispatch packet (~4,260 per
+# frame = +85 ms per frame). The frame-time change per added millisecond is the thread's critical-path share.
+base-0 100
+cd20-1 100 commitdelay 20
+q0d20-1 100 q0delay 20
+base-1 100
+cd20-2 100 commitdelay 20
+q0d20-2 100 q0delay 20
+base-2 100

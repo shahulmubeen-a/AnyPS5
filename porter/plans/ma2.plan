@@ -1,0 +1,11 @@
+# ma2 (2026-10-30 night): menu, profiled. Are the two menu levers additive (deferred stores shorten the GPU idle,
+# skipping GPU-heavy dispatches shortens the GPU busy time)? If frame = GPU busy + GPU idle, ds+gpu6 gains both.
+base-0 60
+ds-1 60 deferstores on
+gpu6-1 60 prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+both-1 60 deferstores on;;prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+base-1 60
+ds-2 60 deferstores on
+gpu6-2 60 prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+both-2 60 deferstores on;;prog 0x141ecbf00;;prog 0x8000208b00;;prog 0x80003e8700;;prog 0x80003ae600;;prog 0x8000310700;;prog 0x801f6d2900
+base-2 60

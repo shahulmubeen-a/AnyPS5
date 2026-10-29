@@ -1,0 +1,4 @@
+# ws1 (2026-10-30 night): world at HOME with the committer and queue-0 samplers (APS5_SAMPLE_COMMITTER,
+# APS5_SAMPLE_WORKER) on the current build: where the committer's per-commit time goes in the world, where wc1 showed
+# the committer on the critical path (slope ~0.95).
+base-0 240

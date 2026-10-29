@@ -1,0 +1,3 @@
+# wt2 (2026-10-30 night): world at HOME, GPU time per program (APS5_PROFILE_GPU, APS5_GPUTIME_TOP=0) with the
+# Elements program labels (APS5_ELEM_TOP=400), to split GPU time by guest queue; unchanged scene only.
+base-0 300

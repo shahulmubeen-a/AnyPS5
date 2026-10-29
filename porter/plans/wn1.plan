@@ -1,0 +1,6 @@
+# wn1 (2026-10-30 night): world at HOME with APS5_ASYNC_LANE unset (the cloth ring 0x51 records into the main queue
+# like every other ring), unprofiled. Compare with the base steps of wa1 (same build, lane on): what the GPU
+# concurrency we already have (44-50 ms of cloth per frame, 94 % overlapped in wt1) is worth.
+base-0 100
+base-1 100
+base-2 100

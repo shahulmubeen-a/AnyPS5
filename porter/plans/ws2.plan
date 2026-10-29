@@ -1,0 +1,3 @@
+# ws2 (2026-10-30 night): world at HOME with deferred stores on, committer and queue-0 samplers: where the committer's
+# time goes once its GPU waits are gone (wc2: still the critical path, slope 0.77).
+ds-0 240 deferstores on

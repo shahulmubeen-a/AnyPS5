@@ -1,0 +1,12 @@
+# wa1 (2026-10-30 night): world at HOME, unprofiled, A/B of the q0 drain lever (miss items), deferred stores, and a
+# GPU-sensitivity probe: the two particle-emit programs (q20, 0x801f64cc00 + 0x801f808700, ~46 ms of GPU per frame in
+# wt2 for ~1.7 dispatches per frame) skipped. The first lane-serialize attempt (wt1) deadlocked, so no lane switch here.
+base-0 100
+miss-1 100 switch APS5_PIPELINE_DISPATCH_MISSES on
+ds-1 100 deferstores on
+emit-1 100 prog 0x801f64cc00;;prog 0x801f808700
+base-1 100
+miss-2 100 switch APS5_PIPELINE_DISPATCH_MISSES on
+ds-2 100 deferstores on
+emit-2 100 prog 0x801f64cc00;;prog 0x801f808700
+base-2 100

@@ -3600,7 +3600,9 @@ void Recorder::readGpuTiming(Batch& batch) {
     std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
     // The first field stays the program sum: the measure scripts match on it.
     AgcDriver::ProfilePrint_nid_no_patch("[gputime] %.0f ms of GPU time in %llu batches over 10 s (batch %.0f ms first to last command; classes %.0f ms, all ranges %.0f ms, untimed %.0f ms outside every range; %llu presents; %llu ranges dropped at the %u cap); by program:", timingProgramMs, static_cast<unsigned long long>(timingBatches), timingBatchMs, timingClassMs, timingUnionMs, timingBatchMs - timingUnionMs, static_cast<unsigned long long>(presents), static_cast<unsigned long long>(timingDropped.exchange(0, std::memory_order_relaxed)), MaxTimedRanges);
-    for (std::size_t i = 0; i < hot.size() && i < 12; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.0fms", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms);
+    // Porter: APS5_GPUTIME_TOP=<n> lists n programs instead of 12 (0 = all), to sum GPU time per guest queue.
+    static const std::size_t top = [] { const char* text = std::getenv("APS5_GPUTIME_TOP"); const auto n = text != nullptr ? static_cast<std::size_t>(std::strtoull(text, nullptr, 10)) : std::size_t{12}; return n != 0 ? n : ~std::size_t{0}; }();
+    for (std::size_t i = 0; i < hot.size() && i < top; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.1fms", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms);
     AgcDriver::ProfilePrint_nid_no_patch("; by class:%s\n", classes.c_str());
     timingByKey.clear();
     timingProgramMs = timingClassMs = timingUnionMs = timingBatchMs = 0;

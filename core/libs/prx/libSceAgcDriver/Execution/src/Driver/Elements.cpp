@@ -151,11 +151,25 @@ struct Rules {
     std::size_t pipeDepth = 0;
     bool deferStores = false;
     std::size_t prepareAhead = 0;
+    // commitdelay <us> / q0delay <us>: causal-profiling delays (busy waits) added to every draw-pipeline commit and
+    // to every queue-0 draw or dispatch packet while listed.
+    std::uint32_t commitDelayUs = 0;
+    std::uint32_t q0DelayUs = 0;
     // gpoke <va> <u32>: a 4-byte value written into the game's data at an eboot VA while the rule is listed.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> pokes;
     // switch <APS5_NAME> on|off: a runtime switch of the in-run A/B registry set live while listed.
     std::vector<std::pair<std::string, bool>> switches;
 };
+
+// The causal-profiling delays of the current rules (commitdelay / q0delay), in microseconds.
+std::atomic<std::uint32_t> commitDelay{0};
+std::atomic<std::uint32_t> q0Delay{0};
+
+void SpinMicroseconds(std::uint32_t us) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+}
 
 // The environment values of switches a rule changed, restored when their rule goes away.
 std::vector<std::pair<std::string, bool>> switchOriginals;
@@ -278,6 +292,8 @@ void Reload(const char* path) {
         else if (verb == "deferstores") next->deferStores = rest == "on";
         else if (verb == "pipedepth") next->pipeDepth = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "prepahead") next->prepareAhead = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
+        else if (verb == "commitdelay") next->commitDelayUs = static_cast<std::uint32_t>(std::strtoul(rest.c_str(), nullptr, 10));
+        else if (verb == "q0delay") next->q0DelayUs = static_cast<std::uint32_t>(std::strtoul(rest.c_str(), nullptr, 10));
         else if (verb == "switch") {
             std::istringstream values(rest);
             std::string name, value;
@@ -298,6 +314,8 @@ void Reload(const char* path) {
     Graphics::StorageTexture::SetPorterDeferStores(next->deferStores);
     ApplyPokes(*next);
     ApplySwitches(*next);
+    commitDelay.store(next->commitDelayUs, std::memory_order_relaxed);
+    q0Delay.store(next->q0DelayUs, std::memory_order_relaxed);
     std::fprintf(stderr, "[elem] rules %llu: %zu lines from %s\n", static_cast<unsigned long long>(next->generation), count, path);
     std::fflush(stderr);
 }
@@ -454,6 +472,9 @@ bool PacketScope::Begin(std::uint32_t queueId, const QueueState& queue, std::uin
         current.programSlot = ProgramSlot('c', program, program);
     }
     if (type != Draw && type != Dispatch) return false;
+    if (queueId == 0) {
+        if (const auto us = q0Delay.load(std::memory_order_relaxed); us != 0) SpinMicroseconds(us);
+    }
     const auto* active = CurrentRules();
     if (active == nullptr || !active->any) return false;
     bool skip = Contains(active->queues, queueId);
@@ -538,6 +559,10 @@ bool SkipDrawPrograms(std::uint64_t first, std::uint64_t last) {
     if (!Contains(active->programs, first) && !Contains(active->programs, last)) return false;
     if (auto* entry = Programs().At(current.programSlot)) entry->skipped.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+void DelayCommit() {
+    if (const auto us = commitDelay.load(std::memory_order_relaxed); us != 0) SpinMicroseconds(us);
 }
 
 void NoteCommit(const Tag& tag, std::uint64_t ns, bool prepare) {

@@ -1,0 +1,12 @@
+# mc1 (2026-10-30 night): causal profiling at the main menu (profiled, APS5_PROFILE_DRAW). A known delay is added per
+# call on one thread; the frame-time change per added millisecond says whether that thread is on the critical path
+# (hypothesis 2: every microsecond per call costs calls-per-frame microseconds of frame time).
+# commitdelay 40: +40 us per draw-pipeline commit (~553 commits per frame = +22 ms of committer time per frame).
+# q0delay 40: +40 us per queue-0 draw or dispatch packet (~600 per frame = +24 ms of queue-0 worker time per frame).
+base-0 60
+cd40-1 60 commitdelay 40
+q0d40-1 60 q0delay 40
+base-1 60
+cd40-2 60 commitdelay 40
+q0d40-2 60 q0delay 40
+base-2 60

@@ -30,6 +30,8 @@
 //   gpoke <va> <u32>  writes a dword into the game's data at an eboot VA while listed (engine knobs, e.g. the
 //                 shadow cascade count at 0x213d794); the original value comes back when the line goes
 //   switch <APS5_NAME> on|off  sets a runtime switch of the in-run A/B registry (RuntimeSwitches.cpp) live
+//   commitdelay <us>  busy-waits <us> after every draw-pipeline commit (causal profiling: frame-time slope)
+//   q0delay <us>  busy-waits <us> before every queue-0 draw or dispatch packet (same, for the queue-0 worker)
 // '#' starts a comment. Skipped packets are counted per element.
 namespace AgcDriver {
 struct QueueState;
@@ -79,6 +81,8 @@ void NoteDrawPrograms(std::uint64_t first, std::uint64_t last);
 bool SkipDrawPrograms(std::uint64_t first, std::uint64_t last);
 // Committer / preparer time of an enqueued item.
 void NoteCommit(const Tag& tag, std::uint64_t ns, bool prepare);
+// The "commitdelay <us>" rule: a busy wait after each draw-pipeline commit (committer thread).
+void DelayCommit();
 // Guest-level skip rules for the porter L3 hook handlers: kind 1 item, 2 instanced, 3 instanced-b, 10 other.
 bool GuestSkip(std::uint32_t kind, std::uint64_t va, std::uint64_t material);
 
