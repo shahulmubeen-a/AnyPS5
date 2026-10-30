@@ -1,0 +1,11 @@
+# pw2 (2026-10-30): world at HOME, unprofiled, a base step (the old waits: deferstores off) between every variant.
+# p1 = new default (lease waits skipped, lease guard sampling 1 in 16); noguard = no guard samples.
+base-0 100 deferstores off
+p1-1 100
+base-1 100 deferstores off
+noguard-1 100 switch APS5_NO_LEASE_GUARD on
+base-2 100 deferstores off
+p1-2 100
+base-3 100 deferstores off
+noguard-2 100 switch APS5_NO_LEASE_GUARD on
+base-4 100 deferstores off
