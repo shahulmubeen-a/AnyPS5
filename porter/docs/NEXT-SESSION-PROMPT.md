@@ -1,39 +1,45 @@
-# Prompt for the next session (written 2026-10-30 ~02:30, after the Tsushima-comparison night)
+# Prompt for the next session (written 2026-10-30, after the GPU-ordered write-backs became the default)
 
 Paste the text between the lines into a new Claude Code session started in `C:\Users\Mubeen\Documents\Projects`.
 
 ---
 
 Continue the Ghost of Yōtei fps work in ps5-porter (`porter/elements`, runtime `D:\Games\AnyPS5\PPSA26344-elem`).
+Take autonomy; I check back later.
 
-Read first: memory `yotei-frame-structure-20261030` (loaded automatically), then
-`yotei-work/REPORT-2026-10-30-tsushima-compare.md` (the report I read in the morning) and
-`ps5-porter/porter/docs/tsu-compare-night-20261030.md` (every number of that night), then
-`yotei-work/porter/research-committer-syncs.md` (proposals P1 and P2).
+Read first: memory `yotei-p1-default-20261030` (loaded automatically), then `yotei-work/REPORT-2026-10-30-p1-default.md`
+(every number of 2026-10-30) and `yotei-work/porter/proposal-cheaper-commits-20261030.md` (the next change, waiting
+for my OK).
 
-State: the night of 2026-10-29/30 measured the frame causally. The main menu (benchmark) is GPU time 1:1 plus
-~57 ms of sync gaps per frame; the world at HOME is limited by the draw committer (+20 µs per commit = +54 ms per
-frame). The proposed change, waiting for my OK, is to make deferred storage write-backs the default (P1 of the
-research note; today the porter rule `deferstores on`): +10-12 % menu and +7-8 % world, measured 4 of 4 steps each.
-It removes the committer's GPU waits for labels and depth planes (world 105 -> 5 ms per frame); the waits partly
-move to queues 0x20/0x30 as CPU readers. After it the committer is still the world's critical path (slope 0.77), so
-the next change is cheaper commits (draw recipes: port the porter/main L3 engine cache, relocate the vertex-fetch
-pointer words).
+State: the GPU-ordered storage write-backs (P1) are the default on porter/elements (590cafaa9, 2f6d135e0, 7583a9306,
+all local, deployed: driver 7F1F794C690D). The address-based lease wait was their whole cost; with my OK it is skipped
+by default and a lease guard samples every 16th lease-covered flush (first stamp turns the waits back on and prints a
+`[defer] lease guard` line). Measured: menu +14.6 %, world +8.5 to +11.5 % without the lease wait; 0 of 53,250 lease
+waits stamped the stored blocks. Switches: APS5_NO_DEFER_STORES (old waits), APS5_NO_DEFER_OVER_LEASES (always wait
+for leases), APS5_NO_LEASE_GUARD (no samples), APS5_NO_FLUSH_LANE_WAIT (full flush waits), and the condition drops
+APS5_DEFER_UNWATCHED / APS5_DEFER_OVER_COMPLETIONS / APS5_DEFER_OVER_LANE / APS5_NO_DEFER_KEEP_WRITER.
 
-If I said OK: turn the rule into a default with the P1 conditions (each condition behind a switch first, so a plan
-can A/B it live; see `porter/plans/wa1.plan` and `ma1.plan`; `porter/tools/elem-run.ps1 -StayAtMenu 1 -Plan ...` runs
-a plan at the menu), run the tests the research note lists, then A/B menu (ma-style plan, profiled) and world
-(wa-style, unprofiled, base steps between every variant) and compare screenshots in `runs-best/shots-<tag>`. Report
-numbers per step with `yotei-work/tools/plan_steps_profile.py` (profiled runs) and the plan file.
-
-Diagnostics added that night (uncommitted at first, see git status): `APS5_GPUTIME_TOP=0` (all programs in
-[gputime]), `APS5_TRACE_DISPATCH_CACHE_FROM=<present>`, Elements rules `commitdelay <us>` and `q0delay <us>`
-(causal profiling: the frame-time slope per added microsecond). Never put `switch APS5_LANE_SERIALIZE on` in a plan:
-it deadlocked the GPU timelines live.
+To do, in this order:
+1. If `yotei-work/runs-best/plan-pm2.txt` and `plan-pw2.txt` are missing or incomplete, run the A/B of the final
+   default: `yotei-work/tools/p1-series-1030.ps1 -RunList "pm2|menu,pw2|world" -Name p1c` started detached
+   (Win32_Process Create). Report per step with `yotei-work/tools/plan_gains.py`, `plan_steps_profile.py` and
+   `shots_compare.py` (look at the shots: glare, black foliage, missing objects). Check every play and run log for a
+   `[defer] lease guard` line.
+2. Look at the freeze of 2026-10-30 10:08 (ws3 run): picking up the Kusarigama in the world stopped all GPU work (0
+   packets per 10 s, title-side stall) with the old waits on. If I played again and hit it, the log is the newest
+   `runs-best/run-play-*.err.log`. Find what the title waits for (thread state, last HLE calls); report before fixing.
+3. Do not start the cheaper-commits change without my OK.
 
 Rules that still apply: everything stays local, take the shared locks before game runs, Ghidra jobs and builds
-(`python -I yotei-work/engine/tools/lock.py`), record every deployment in `yotei-work/SYSTEM-CHANGES.md`, prove
-claims with checkable evidence, install nothing without asking, commits use my personal git identity, start game
-runs detached (Win32_Process Create), never build while a measurement run is going, no public posts without my OK.
+(`python -I yotei-work/engine/tools/lock.py`), prove claims with checkable evidence, install nothing without asking,
+start game runs detached (Win32_Process Create), never build while a measurement run is going, no public posts or
+PRs without my OK, personal git identity, do not push, record deployments in `yotei-work/SYSTEM-CHANGES.md`. Never
+put `switch APS5_LANE_SERIALIZE on` in a plan. Tell me before a measurement run starts: I sometimes play in the game
+window with a controller (`yotei-work/tools/play-elem.ps1` is my play launcher; it takes the locks, and
+`after-play-series.ps1 -KeepSaveAs <name>` keeps my save before a series swaps the Ezo save back in). Foreground
+`sleep` over a few minutes is blocked in Bash; wait with run_in_background until-loops or Monitor.
+
+At the end: write a report in `yotei-work/` with numbers per step, update memory, rewrite this prompt file for the
+session after.
 
 ---
