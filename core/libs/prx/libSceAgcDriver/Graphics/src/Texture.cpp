@@ -133,19 +133,59 @@ std::atomic<std::uint64_t> partialUploads{0}, partialUploadBytes{0}, partialWrit
 std::atomic<std::uint64_t> pretestSkipped{0}, unregisteredDropped{0}, keyFlipKept{0};
 // Storage refreshes whose flush recorded its write-backs behind the pending writer (APS5_DEFER_REFRESH_FLUSH).
 std::atomic<std::uint64_t> deferredRefreshFlushes{0};
-// Porter (element rules "deferstores on"): more FlushPending reasons record their write-backs behind the pending
-// writer on the GPU instead of waiting for it on the CPU, under the same all-imported condition as the refresh
-// deferral. The label/interrupt read-backs stay ordered because the label itself is written on the GPU after them.
-std::atomic<bool> porterDeferStores{false};
-std::atomic<std::uint64_t> porterDeferredStores{0};
+// GPU-ordered write-backs (P1 of yotei-work/porter/research-committer-syncs.md; until 2026-10-30 the porter element
+// rule "deferstores on"): a FlushPending for one of these reasons records its write-backs behind the pending writer
+// on the GPU instead of waiting for that writer on the CPU, when every flushed image stores into a host import (the
+// condition of the refresh deferral). Each write-back notes its range as a pending write, so a CPU reader still waits
+// for it in the flush hook, and the label of a label/interrupt read-back is written on the GPU after the write-back
+// (WriteLabelOnGpu), so a title polling it still sees the data. "storage refresh" joins only under
+// APS5_DEFER_REFRESH_FLUSH. The writer wait still runs when (each runtime switch drops its condition, for the A/B):
+// - a stored range lies outside the write watch: the keep-blocks compare there reads guest bytes the writer has not
+//   written yet (APS5_DEFER_UNWATCHED);
+// - a copied writer, a completion label or a completion store overlaps a stored range: its CPU store at its batch's
+//   reap could land before or after the recorded write-back (APS5_DEFER_OVER_COMPLETIONS);
+// - a writer of the async lane overlaps a stored range while the flushing thread records on lane 0: the write-back
+//   in lane 0 is not ordered after it (APS5_DEFER_OVER_LANE).
+// An address-based lease over a stored range is still waited for, since its writes are stamped only when its batch
+// completes (APS5_DEFER_OVER_LEASES skips that wait too). In a deferred write-back, a 64 KiB block written since its
+// layer's generation that an unfinished batch writes is left to that writer without comparing its guest bytes
+// (writeBackLayers; APS5_NO_DEFER_KEEP_WRITER compares as before). APS5_NO_DEFER_STORES waits as before, with the
+// refresh deferral alone; the element rule "deferstores on|off" sets it live.
+constexpr std::array<const char*, 7> GpuOrderedReasons{"readback before label", "readback before interrupt", "depth plane store", "storage image creation", "imported buffer region", "written buffer range", "storage refresh"};
+// Cumulative (each report keeps its own last values): deferred flushes by reason, refusals by condition, lease
+// waits kept, blocks left to an unfinished writer.
+std::array<std::atomic<std::uint64_t>, GpuOrderedReasons.size()> gpuOrderedFlushes{};
+enum class GpuOrderRefusal : std::size_t { Unwatched, Completion, Lane, Count };
+std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GpuOrderRefusal::Count)> gpuOrderRefusals{};
+std::atomic<std::uint64_t> gpuOrderLeaseWaits{0}, gpuOrderKeptForWriter{0};
+// Set by FlushPending around the write-backs it records behind the pending writer (the keep-blocks rule).
+thread_local bool gpuOrderedWriteBack = false;
 
-bool PorterDeferReason(const char* reason) {
-    if (reason == nullptr || !porterDeferStores.load(std::memory_order_relaxed)) return false;
-    static constexpr const char* reasons[] = {"readback before label", "readback before interrupt", "depth plane store", "storage image creation", "imported buffer region", "written buffer range"};
-    for (const char* candidate : reasons) {
-        if (std::strcmp(reason, candidate) == 0) return true;
+// The index of `reason` in GpuOrderedReasons, or -1.
+int GpuOrderedReason(const char* reason, bool refresh) {
+    if (reason == nullptr) return -1;
+    for (std::size_t index = 0; index < GpuOrderedReasons.size(); ++index) {
+        if (std::strcmp(reason, GpuOrderedReasons[index]) != 0) continue;
+        return index + 1 == GpuOrderedReasons.size() && !refresh ? -1 : static_cast<int>(index);
     }
-    return false;
+    return -1;
+}
+
+// The first condition above that keeps the writer wait for write-backs over `ranges` (the stored layers), if any;
+// under GuestMemory::GpuMutex. `asyncLaneThread`: the flush came from a thread of the async lane, whose work so far
+// the lane switch into lane 0 orders before the write-backs.
+std::optional<GpuOrderRefusal> GpuOrderRefused(const Recorder& recorder, const Context& context, std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, bool asyncLaneThread) {
+    const auto any = [&](const auto& test) { return std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) { return test(range.first, static_cast<std::size_t>(range.second - range.first)); }); };
+    if (!RuntimeSwitches::Set(RuntimeSwitch::DeferUnwatched) && any([](std::uint64_t begin, std::size_t bytes) { return !GuestMemory::Watched(begin, bytes); })) return GpuOrderRefusal::Unwatched;
+    if (!RuntimeSwitches::Set(RuntimeSwitch::DeferOverCompletions)) {
+        const auto drawWriters = DrawCopiedWriters();
+        const bool listed = (context.copiedWriters != nullptr && !context.copiedWriters->empty()) || !drawWriters->empty();
+        const bool labels = Recorder::PendingCompletionLabels() != 0 || Recorder::PendingCompletionStores() != 0;
+        const auto copied = [](const std::vector<std::shared_ptr<ShaderResources>>& writers, std::uint64_t begin, std::size_t bytes) { return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->CopiedWritesOverlap(begin, bytes); }); };
+        if ((listed || labels) && any([&](std::uint64_t begin, std::size_t bytes) { return (context.copiedWriters != nullptr && copied(*context.copiedWriters, begin, bytes)) || copied(*drawWriters, begin, bytes) || (labels && recorder.CompletionLabelIn(begin, bytes)); })) return GpuOrderRefusal::Completion;
+    }
+    if (!asyncLaneThread && recorder.AsyncLaneActive() && !RuntimeSwitches::Set(RuntimeSwitch::DeferOverLane) && any([&](std::uint64_t begin, std::size_t bytes) { return recorder.LaneWriterOverlaps(1, begin, bytes); })) return GpuOrderRefusal::Lane;
+    return std::nullopt;
 }
 std::atomic<std::uint64_t> deferredFlipStores{0};
 std::atomic<std::uint64_t> queuedReadHeld{0}, heldReadSkips{0};
@@ -195,8 +235,25 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     }
     const auto take = [](std::atomic<std::uint64_t>& counter) { return static_cast<unsigned long long>(counter.exchange(0, std::memory_order_relaxed)); };
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
+    // GPU-ordered write-backs (see GpuOrderedReasons) since the last line, by reason, and the flushes their
+    // conditions kept waiting.
+    static std::array<std::uint64_t, GpuOrderedReasons.size()> lastOrdered{};
+    static StorageTexture::GpuOrderCounts lastOrder{};
+    std::string ordered;
+    for (std::size_t index = 0; index < GpuOrderedReasons.size(); ++index) {
+        const auto total = gpuOrderedFlushes[index].load(std::memory_order_relaxed);
+        if (total == lastOrdered[index]) continue;
+        std::snprintf(text, sizeof(text), " %s %llu", GpuOrderedReasons[index], static_cast<unsigned long long>(total - lastOrdered[index]));
+        ordered += text;
+        lastOrdered[index] = total;
+    }
+    const auto order = StorageTexture::GpuOrderTotals();
+    char kept[256];
+    std::snprintf(kept, sizeof(kept), "; kept waiting: unwatched %llu, completions %llu, lane %llu; lease waits %llu; blocks left to a pending writer %llu", static_cast<unsigned long long>(order.unwatched - lastOrder.unwatched), static_cast<unsigned long long>(order.completions - lastOrder.completions), static_cast<unsigned long long>(order.lane - lastOrder.lane), static_cast<unsigned long long>(order.leaseWaits - lastOrder.leaseWaits), static_cast<unsigned long long>(order.keptForWriter - lastOrder.keptForWriter));
+    ordered += kept;
+    lastOrder = order;
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
-    AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, handed over at %llu clear-key refreshes (%llu units superseded), dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu (%llu flushes with nothing to store skipped the check%s), evicted stale %llu, refresh flushes deferred %llu, flip stores deferred %llu\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(clearHandOvers), take(handedOverSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(heldReadSkips), RuntimeSwitches::Set(RuntimeSwitch::NoHeldReadSkip) ? ", APS5_NO_HELD_READ_SKIP" : "", take(staleEvicted), take(deferredRefreshFlushes), take(deferredFlipStores));
+    AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, handed over at %llu clear-key refreshes (%llu units superseded), dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu (%llu flushes with nothing to store skipped the check%s), evicted stale %llu, refresh flushes deferred %llu, flip stores deferred %llu; GPU-ordered write-backs (%s):%s\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(clearHandOvers), take(handedOverSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(heldReadSkips), RuntimeSwitches::Set(RuntimeSwitch::NoHeldReadSkip) ? ", APS5_NO_HELD_READ_SKIP" : "", take(staleEvicted), take(deferredRefreshFlushes), take(deferredFlipStores), RuntimeSwitches::Set(RuntimeSwitch::NoDeferStores) ? "off, APS5_NO_DEFER_STORES" : "on", ordered.c_str());
     traffic.writeBacks.clear();
     traffic.uploadReasons.clear();
     traffic.directWriteBacks = 0;
@@ -4368,8 +4425,9 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     std::lock_guard gpu(GuestMemory::GpuMutex());
     // Storage results reach guest memory for every queue: recorded into the main lane, ordered after
     // the async lane's work so far (Recorder::LaneSwitch), whichever lane's access found them pending.
+    const bool asyncLaneThread = Recorder::ThreadLane() != 0;
     std::optional<Recorder::LaneSwitch> laneSwitch;
-    if (Recorder::ThreadLane() != 0) laneSwitch.emplace(Recorder::Active(), 0);
+    if (asyncLaneThread) laneSwitch.emplace(Recorder::Active(), 0);
     // APS5_DEFER_REFRESH_FLUSH=1 (experiment): a storage refresh whose flushed images all store
     // GPU-direct (block units into an import) records their write-backs behind the pending writer
     // instead of waiting for it on the CPU: the recorded order keeps the writer first, and each
@@ -4387,13 +4445,31 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     const bool deferRefresh = RuntimeSwitches::Set(RuntimeSwitch::DeferRefreshFlush);
     const bool flipStore = reason != nullptr && std::strcmp(reason, "flip") == 0;
     const bool deferFlip = flipStore && (deferImported || RuntimeSwitches::Set(RuntimeSwitch::DeferFlipStore));
+    // The GPU-ordered reasons (see GpuOrderedReasons) under their conditions; APS5_NO_DEFER_STORES leaves the refresh
+    // deferral alone, without them, as before.
+    const int ordered = RuntimeSwitches::Set(RuntimeSwitch::NoDeferStores) ? -1 : GpuOrderedReason(reason, deferRefresh);
+    const bool refreshAlone = ordered < 0 && deferRefresh && reason != nullptr && std::strcmp(reason, "storage refresh") == 0;
     bool deferWriter = false;
-    const bool porterDefer = PorterDeferReason(reason);
-    if ((deferFlip || porterDefer || (deferRefresh && reason != nullptr && std::strcmp(reason, "storage refresh") == 0)) && Recorder::Active() != nullptr && !Recorder::InCompletion()) {
+    bool leaseWait = false;
+    if ((deferFlip || ordered >= 0 || refreshAlone) && Recorder::Active() != nullptr && !Recorder::InCompletion()) {
         deferWriter = std::all_of(flush.begin(), flush.end(), [deferImported](const std::shared_ptr<StorageTexture>& texture) { return (texture->blockUnits || deferImported) && HostImportFor(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) != nullptr; });
-        if (deferWriter) (porterDefer ? porterDeferredStores : flipStore ? deferredFlipStores : deferredRefreshFlushes).fetch_add(1, std::memory_order_relaxed);
+        if (deferWriter && ordered >= 0) {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+            for (const auto& texture : flush) texture->appendStoredLayers(address, bytes, ranges);
+            const auto refusal = GpuOrderRefused(*Recorder::Active(), flush.front()->context, ranges, asyncLaneThread);
+            if (refusal) {
+                deferWriter = false;
+                gpuOrderRefusals[static_cast<std::size_t>(*refusal)].fetch_add(1, std::memory_order_relaxed);
+            } else {
+                leaseWait = !RuntimeSwitches::Set(RuntimeSwitch::DeferOverLeases);
+            }
+            static constexpr const char* refusals[] = {"outside the write watch", "over a copied writer or completion store", "over an async-lane writer"};
+            if (trace) std::fprintf(stderr, "[flush] %s 0x%llx+0x%zx: %s%s\n", reason, static_cast<unsigned long long>(address), bytes, refusal ? "waits for the writer, " : "GPU-ordered", refusal ? refusals[static_cast<std::size_t>(*refusal)] : leaseWait ? " (address-based leases still waited for)" : "");
+        }
+        if (deferWriter) (ordered >= 0 ? gpuOrderedFlushes[static_cast<std::size_t>(ordered)] : flipStore ? deferredFlipStores : deferredRefreshFlushes).fetch_add(1, std::memory_order_relaxed);
     }
-    if (auto* recorder = Recorder::Active(); !deferWriter && recorder != nullptr && !Recorder::InCompletion()) {
+    // A GPU-ordered flush waits only for an address-based lease over its stored layers (leaseWait).
+    if (auto* recorder = Recorder::Active(); (!deferWriter || leaseWait) && recorder != nullptr && !Recorder::InCompletion()) {
         try {
             const bool wholeRange = RuntimeSwitches::Set(RuntimeSwitch::FlushWaitWholeRange);
             std::vector<std::pair<std::uint64_t, std::uint64_t>> stored;
@@ -4414,7 +4490,8 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
                 }
                 for (const auto& [begin, end] : stored) {
                     if (writer == active.OpenSerial()) break;
-                    writer = std::max(writer, active.PendingWriterSerial(begin, static_cast<std::size_t>(end - begin)));
+                    const auto span = static_cast<std::size_t>(end - begin);
+                    writer = std::max(writer, leaseWait ? active.PendingLeaseSerial(begin, span) : active.PendingWriterSerial(begin, span));
                 }
                 return writer;
             };
@@ -4423,7 +4500,9 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
             };
             if (pendingWriter(*recorder) != 0) {
                 recorder->Reap();
-                if (const auto writer = pendingWriter(*recorder); writer == recorder->OpenSerial()) {
+                const auto writer = pendingWriter(*recorder);
+                if (leaseWait && writer != 0) gpuOrderLeaseWaits.fetch_add(1, std::memory_order_relaxed);
+                if (writer == recorder->OpenSerial()) {
                     Recorder::CountSync(openWrites(*recorder) ? 1 : 3);
                     recorder->Sync();
                 } else if (writer != 0) {
@@ -4437,6 +4516,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     }
     std::exception_ptr failure;
     const auto previousReason = std::exchange(flushReason, reason);
+    const auto previousOrdered = std::exchange(gpuOrderedWriteBack, deferWriter && ordered >= 0 && !RuntimeSwitches::Set(RuntimeSwitch::NoDeferKeepWriter));
     for (const auto& texture : flush) {
         try {
             // Only the pending layers the access overlaps are stored; the others stay pending (the
@@ -4447,6 +4527,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         }
     }
     flushReason = previousReason;
+    gpuOrderedWriteBack = previousOrdered;
     if (failure) std::rethrow_exception(failure);
     // The stores above went into the unit shadows where slabs took them: the consumer reads the
     // import, so they are published under the same hold, after every store.
@@ -4722,12 +4803,15 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
     return stored;
 }
 
-void StorageTexture::SetPorterDeferStores(bool on) {
-    porterDeferStores.store(on, std::memory_order_relaxed);
-}
-
-std::uint64_t StorageTexture::TakePorterDeferredStores() {
-    return porterDeferredStores.exchange(0, std::memory_order_relaxed);
+StorageTexture::GpuOrderCounts StorageTexture::GpuOrderTotals() {
+    GpuOrderCounts counts;
+    for (const auto& flushes : gpuOrderedFlushes) counts.deferred += flushes.load(std::memory_order_relaxed);
+    counts.unwatched = gpuOrderRefusals[static_cast<std::size_t>(GpuOrderRefusal::Unwatched)].load(std::memory_order_relaxed);
+    counts.completions = gpuOrderRefusals[static_cast<std::size_t>(GpuOrderRefusal::Completion)].load(std::memory_order_relaxed);
+    counts.lane = gpuOrderRefusals[static_cast<std::size_t>(GpuOrderRefusal::Lane)].load(std::memory_order_relaxed);
+    counts.leaseWaits = gpuOrderLeaseWaits.load(std::memory_order_relaxed);
+    counts.keptForWriter = gpuOrderKeptForWriter.load(std::memory_order_relaxed);
+    return counts;
 }
 
 void StorageTexture::StoreReadbackBeforeLabel(const char* reason) {
@@ -6078,6 +6162,15 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         }
     };
     bool unsavedOutsideWatch = false;
+    // A GPU-ordered write-back (FlushPending did not wait for the writer) leaves a written block that an unfinished
+    // batch writes to that writer: its guest bytes are not final, so the compare would judge the bytes from before
+    // the write. When the writer changed them, the synced store keeps them too.
+    const auto* unfinishedWriters = gpuOrderedWriteBack ? Recorder::Active() : nullptr;
+    const auto leftToWriter = [&](std::uint64_t from, std::uint64_t to) {
+        if (unfinishedWriters == nullptr || unfinishedWriters->PendingWriteSettled(from, static_cast<std::size_t>(to - from))) return false;
+        gpuOrderKeptForWriter.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (!layers[layer]) continue;
         const auto begin = layerBegin(layer);
@@ -6092,7 +6185,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             const auto to = std::min(at + block, end);
             if (from >= to) continue;
             const bool edge = from != at || to != at + block;
-            if (keptAtUnwatchHolds(from, layer) || (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), layerGeneration[layer])) && !unchangedSinceBaseline(from, to))) {
+            if (keptAtUnwatchHolds(from, layer) || (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), layerGeneration[layer])) && (leftToWriter(from, to) || !unchangedSinceBaseline(from, to)))) {
                 skippedAny = true;
                 skippedLayer[layer] = true;
                 ++skipped;

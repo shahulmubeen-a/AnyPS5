@@ -401,6 +401,9 @@ public:
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t PendingWriterSerial(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t PendingLeaseSerial(std::uint64_t address, std::size_t bytes) const;
+    // Whether a batch of `lane` (open or in flight) holds a writer PendingWriterSerial would find over the range: a
+    // noted write or an address-based lease. The deferred storage write-backs' lane condition (Texture.cpp).
+    bool LaneWriterOverlaps(int lane, std::uint64_t address, std::size_t bytes) const;
     // What SyncThrough(address, bytes) would wait for, for the [hooksync] attribution: the newest
     // batch whose noted range overlaps the access (the open batch counts first, with the serial it
     // will get), whether that batch's fence has already signaled (its GPU work is done, so the

@@ -149,7 +149,6 @@ struct Rules {
     bool guest = false;
     int lockPriority = -1;
     std::size_t pipeDepth = 0;
-    bool deferStores = false;
     std::size_t prepareAhead = 0;
     // commitdelay <us> / q0delay <us>: causal-profiling delays (busy waits) added to every draw-pipeline commit and
     // to every queue-0 draw or dispatch packet while listed.
@@ -289,7 +288,7 @@ void Reload(const char* path) {
         else if (verb == "gva") next->gvas.push_back(hex);
         else if (verb == "gmat") next->gmaterials.push_back(hex);
         else if (verb == "lockprio") next->lockPriority = rest == "on" ? 1 : rest == "off" ? 0 : -1;
-        else if (verb == "deferstores") next->deferStores = rest == "on";
+        else if (verb == "deferstores") next->switches.emplace_back("APS5_NO_DEFER_STORES", rest != "on");
         else if (verb == "pipedepth") next->pipeDepth = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "prepahead") next->prepareAhead = static_cast<std::size_t>(std::strtoull(rest.c_str(), nullptr, 10));
         else if (verb == "commitdelay") next->commitDelayUs = static_cast<std::uint32_t>(std::strtoul(rest.c_str(), nullptr, 10));
@@ -311,7 +310,6 @@ void Reload(const char* path) {
     rules.store(next, std::memory_order_release);  // the previous rules are leaked: readers may still hold them
     GuestMemory::SetGpuLockPriority(next->lockPriority);
     DriverDetail::DrawPipeline::OverrideDepth(next->pipeDepth, next->prepareAhead);
-    Graphics::StorageTexture::SetPorterDeferStores(next->deferStores);
     ApplyPokes(*next);
     ApplySwitches(*next);
     commitDelay.store(next->commitDelayUs, std::memory_order_relaxed);
@@ -678,13 +676,20 @@ void Report() {
         const auto presyncUs = presyncs.waitedUs - lastPresyncUs;
         lastPresyncs = presyncs.waited;
         lastPresyncUs = presyncs.waitedUs;
-        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; %llu deferred stores; %llu depth pre-syncs %.0f ms; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size(), static_cast<unsigned long long>(Graphics::StorageTexture::TakePorterDeferredStores()), static_cast<unsigned long long>(presyncCount), presyncUs / 1000.0);
+        // GPU-ordered storage write-backs (Texture.cpp GpuOrderedReasons) in this round, and the flushes their
+        // conditions kept waiting ([elem-defer]).
+        static Graphics::StorageTexture::GpuOrderCounts lastOrdering{};
+        const auto ordering = Graphics::StorageTexture::GpuOrderTotals();
+        std::snprintf(line, sizeof(line), "[elem] round %llu (10 s): %zu labels active; %llu deferred stores; %llu depth pre-syncs %.0f ms; per queue worker/commit ms:", static_cast<unsigned long long>(round), labels.size(), static_cast<unsigned long long>(ordering.deferred - lastOrdering.deferred), static_cast<unsigned long long>(presyncCount), presyncUs / 1000.0);
         text += line;
         for (const auto& [queue, sums] : queues) {
             std::snprintf(line, sizeof(line), " q%llx %.0f/%.0f;", static_cast<unsigned long long>(queue == 0 ? 0 : queue - 1), Ms(sums.first), Ms(sums.second));
             text += line;
         }
         text += "\n";
+        std::snprintf(line, sizeof(line), "[elem-defer] %llu kept waiting: unwatched %llu, completions %llu, lane %llu; lease waits %llu; blocks left to a pending writer %llu%s\n", static_cast<unsigned long long>(round), static_cast<unsigned long long>(ordering.unwatched - lastOrdering.unwatched), static_cast<unsigned long long>(ordering.completions - lastOrdering.completions), static_cast<unsigned long long>(ordering.lane - lastOrdering.lane), static_cast<unsigned long long>(ordering.leaseWaits - lastOrdering.leaseWaits), static_cast<unsigned long long>(ordering.keptForWriter - lastOrdering.keptForWriter), Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::NoDeferStores) ? " (APS5_NO_DEFER_STORES)" : "");
+        text += line;
+        lastOrdering = ordering;
         for (std::size_t index = 0; index < std::min(top, labels.size()); ++index) {
             const auto& [slot, d] = labels[index];
             const auto& labelEntry = Labels().entries[slot];

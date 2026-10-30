@@ -298,9 +298,19 @@ public:
     static constexpr std::uint64_t SmallStoreBytes = 64 * 1024;
     static std::size_t StoreSmallPending(const char* reason);
     static void StoreReadbackBeforeLabel(const char* reason);
-    // Porter element rules: defer the writer wait of more FlushPending reasons (see Texture.cpp PorterDeferReason).
-    static void SetPorterDeferStores(bool on);
-    static std::uint64_t TakePorterDeferredStores();
+    // GPU-ordered write-backs (Texture.cpp GpuOrderedReasons), cumulative: FlushPending calls that recorded their
+    // write-backs behind the pending writer, the ones a condition kept waiting (outside the write watch, over a
+    // copied writer or completion store, over an async-lane writer), deferred ones that still waited for an
+    // address-based lease, and 64 KiB blocks a deferred write-back left to an unfinished writer.
+    struct GpuOrderCounts {
+        std::uint64_t deferred = 0;
+        std::uint64_t unwatched = 0;
+        std::uint64_t completions = 0;
+        std::uint64_t lane = 0;
+        std::uint64_t leaseWaits = 0;
+        std::uint64_t keptForWriter = 0;
+    };
+    static GpuOrderCounts GpuOrderTotals();
     static bool AnyPending();
     static void FlushDumpSelected(const char* reason);
     static bool StoreAtFlipRequested(const char* value);

@@ -4063,6 +4063,13 @@ std::uint64_t Recorder::PendingLeaseSerial(std::uint64_t address, std::size_t by
     return 0;
 }
 
+bool Recorder::LaneWriterOverlaps(int lane, std::uint64_t address, std::size_t bytes) const {
+    if (bytes == 0) return false;
+    const auto end = address + bytes;
+    const auto writes = [&](const Batch& batch) { return batch.lane == lane && (overlaps(batch, address, end) || readOverlap(batch, address, end, ReadKind::AddressBased).has_value()); };
+    return anyOpen(writes) || std::any_of(inFlight.begin(), inFlight.end(), [&](const auto& batch) { return writes(*batch); });
+}
+
 bool Recorder::signaled(const Batch& batch) const {
     return batch.submitted && fenceStatus(batch.fence) == VK_SUCCESS;
 }

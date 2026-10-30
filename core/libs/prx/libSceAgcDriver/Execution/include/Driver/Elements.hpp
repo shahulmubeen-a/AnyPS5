@@ -25,7 +25,8 @@
 //   gkind/gva/gmat ...  the same at the guest: the engine function returns at once, so the title never
 //                 writes the packets (porter L3 hooks only)
 //   every <n>     pass/passx rules listed after this line skip their pass except on every n-th present
-//   deferstores on  more storage write-backs are ordered on the GPU instead of waited for (Texture.cpp)
+//   deferstores on|off  GPU-ordered storage write-backs (Texture.cpp GpuOrderedReasons; on by default since
+//                 2026-10-30) on or off live: the runtime switch APS5_NO_DEFER_STORES
 //   lockprio on|off  queue 0's worker and the draw committer take GpuMutex first (APS5_GPU_LOCK_PRIORITY, live)
 //   gpoke <va> <u32>  writes a dword into the game's data at an eboot VA while listed (engine knobs, e.g. the
 //                 shadow cascade count at 0x213d794); the original value comes back when the line goes
