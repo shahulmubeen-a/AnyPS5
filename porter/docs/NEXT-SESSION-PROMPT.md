@@ -1,66 +1,69 @@
-# Prompt for the next session (written 2026-10-30 14:15, after the first measurement of the engine draw cache)
+# Prompt for the next session (written 2026-10-30 17:30, after the engine draw cache miss trace and round 10's walker change)
 
 Paste the text between the lines into a new Claude Code session started in `C:\Users\Mubeen\Documents\Projects`.
 
 ---
 
-Continue the Ghost of Yōtei fps work in ps5-porter: the engine draw cache ("cheaper commits") on branch
-`porter/l3-cache`. Take autonomy; I check back later.
+Continue the Ghost of Yōtei fps work in ps5-porter. The engine draw cache ("cheaper commits", branch `porter/l3-cache`)
+is at a decision point; I decide what comes next (see "Options" below). Take autonomy within what I chose.
 
-Read first: memory `yotei-p1-default-20261030` (loaded automatically), then in `yotei-work/REPORT-2026-10-30-p1-default.md`
-the sections "Cheaper commits, first measurement", "Label-overwrite detector" and "Noon A/B of the final default",
-then `yotei-work/porter/proposal-cheaper-commits-20261030.md` and, on porter/main, `porter/docs/l3-cache-results.md`
-(rounds 1-11 of 2026-10-24; `git show porter/main:porter/docs/l3-cache-results.md`).
+Read first: memory `yotei-l3-trace-20261030` (loaded automatically), then `yotei-work/REPORT-2026-10-30-l3-trace.md`
+(the whole file; it follows "Cheaper commits, first measurement" in `REPORT-2026-10-30-p1-default.md`).
 
 State:
-- Play runtime `D:\Games\AnyPS5\PPSA26344-elem` runs porter/elements f9292db86 (driver hash 2D9F75D3ACC4): the
-  GPU-ordered write-backs (default since 7583a9306) and the label-overwrite detector. I play it with
-  `yotei-work/tools/play-elem.ps1`; it swaps my save in from `save-import/anyps5-player` and copies it back afterwards.
-- Branch `porter/l3-cache` (head a566191fd, local only): porter/main's L3 engine draw cache and draw recipes
-  (rounds 1-11, without round 10's SRT walker change 8c7304adb), `21ed02638` relocation of vertex stages whose fetch
-  tables moved, runtime switches `APS5_PORTER_L3_NO_CACHE` and `APS5_PORTER_L3_NO_FETCH_RELOCATION`, the `[elem-l3]`
-  round line (`7a4fe3742`), plans `porter/plans/l3w1.plan` (world A/B, unprofiled) and `l3p1.plan` (profiled).
-  The cache is off unless `APS5_PORTER_L3_CACHE=1` with `APS5_PORTER_L3=1` and the l3marks hook table.
-- Result of 2026-10-30 (l3w1, l3p1): the cache makes the world 3.5 % slower. Served for 79-81 % of engine draws,
-  validated for 3 %; all hits are in the "other" kind (mostly data hits); DrawItem and DrawInstanced (28,000 of 36,000
-  engine calls per 10 s) validate 0 %, and every validation miss is at stage 0. The most refused register is 0x8e:
-  `[l3-refused]` shows word 2 of a vertex stage's user words is the base of an inline V# (`136f5bc0 00100020 00000013
-  0004dfac`) whose address moves with the ring every frame. Logs: `yotei-work/runs-best/run-l3w1.err.log`,
-  `run-l3p1.err.log`.
+- Play runtime `D:\Games\AnyPS5\PPSA26344-elem` is back on porter/elements (code of f9292db86, built at c4700a70b:
+  driver 4E20AA2F2181, deployed 2026-10-30 17:10): the GPU-ordered write-backs and the label-overwrite detector. I play it with
+  `yotei-work/tools/play-elem.ps1` (it swaps my save in from `save-import/anyps5-player` and copies it back).
+- Branch `porter/l3-cache` (head 452104a35, local only): the engine draw cache (off unless `APS5_PORTER_L3_CACHE=1` with
+  `APS5_PORTER_L3=1` and the l3marks hooks) plus today's work: the miss trace `APS5_PORTER_L3_TRACE_MISSES=<n>`
+  (c96ad3480, 2377ab1c6, 8ac725c62: classes per kind in an `[l3-miss]` line, the first n misses per kind and window
+  with their words, a followed-pointer check for fixed-address runs), round 10's SRT walker change (1a58a0a55, from
+  porter/main 8c7304adb: a user-data V#'s base word is a relocatable base; shader cache SourceVersion
+  4331c3025cbe8dc4) and its rendering fix 40bf8d8e2 (a relocated copy binds a moved user-data V# at its current words;
+  without it the menu showed speckles and a sharp background, `yotei-work/runs-best/l3-menu-crops-20261030.png`).
+  porter/main's 8c7304adb has the same gap and no fix.
+- Shader cache of that branch: `C:\AnyPS5-cache-l3\PPSA26344` (14 GB, warm for the boot, the menu and HOME). Runs of
+  porter/l3-cache must use it (`yotei-work/tools/p1-series-1030.ps1` scenes `world-l3c` and `world-l3tc`), never my
+  play cache `C:\AnyPS5-cache-best`. Tool: `yotei-work/tools/l3_steps.py <err.log> --plan <plan>` (per-step
+  `[elem-l3]`, `[l3-cache]`, `[l3-miss]` sums).
+- Results of 2026-10-30 afternoon: (1) before the walker change, DrawItem and DrawInstanced missed at stage 0 because
+  the relocation refused a moved inline V# in the user words (56 % of the misses), on DrawInstanced's instance data
+  behind a pointer in the per-draw block (31 %) and on V# tables whose bases moved with their table (7 %); per-frame
+  values were 1 %. (2) With the walker change the refusals are gone (-99 %), but validated hits stay at 3.3 % of
+  engine calls (all "other" draws; item 39 per 10 s, instanced 0) and the world is 7.5 % slower with the cache
+  (l3w2 without the fix: -9.6 %; l3w1 before the walker change: -3.5 %). What is left: pointers kept in the per-draw
+  block to other per-frame allocations, which the relocation does not follow (DrawInstanced 49 % and DrawItem 19 % of
+  the misses), and V# bases of per-frame buffers behind them (DrawInstanced's instance V#: only dword 0 differs).
 
-To do, in this order (both steps have my OK):
-1. Find what fails stage-0 validation for DrawItem and DrawInstanced. Add a trace (for example
-   `APS5_PORTER_L3_TRACE_MISSES=<n>`: the first n served misses per kind) that names the first run whose words
-   differ: its address range, its base word (or none), the donor's and the current words at the first differing
-   dwords, and what the run is (the per-draw constant block behind a relocated pointer, a fetch table, an inline V#,
-   a fixed-address run). Check also why DrawItem and DrawInstanced get no stage data hits while "other" does. Then
-   one profiled world run with the trace (a new plan, e.g. l3p2, scene `world-l3p` plus the trace variable). Report
-   what differs. If it is per-frame data (matrices, time, wind) that no relocation can make equal, say what would
-   be needed instead (the data-refresh path) and stop before step 2; otherwise go on.
-2. Port round 10's walker change 8c7304adb (the SRT walker counts a user-data V# base as a relocatable base) onto
-   `porter/l3-cache`. It changes the shader cache SourceVersion, so the l3 runs must use their own cache folder,
-   for example `C:\AnyPS5-cache-l3\PPSA26344` (elem-run.ps1 `-Cache`; add a scene to
-   `yotei-work/tools/p1-series-1030.ps1` that passes it). Never point a run of this build at
-   `C:\AnyPS5-cache-best\PPSA26344`: that is my play cache (84 GB). The first run with the empty cache compiles for
-   about 50 minutes, so give it `-TimeoutMin 90` and treat it as a warm-up, then repeat the A/B (l3w1 and l3p1
-   again under new tags). Report per step: `yotei-work/tools/plan_gains.py`, the `[elem-l3]` sums per step, the
-   `[l3-cache]` and `[l3-refused]` lines, `shots_compare.py` plus a look at the shots (glare, black foliage,
-   missing or wrong objects). Record the new cache folder (and its undo) in `yotei-work/SYSTEM-CHANGES.md`.
+Options (I pick one; nothing is started):
+(a) Nested relocation plus a V# base refresh (driver only, same shader cache): runs read through a pointer kept in a
+    run are re-based on that pointer (relocateDonor reads the pointer at its relocated place and shifts them; the
+    pointer words are taken at their current value), and a differing V# dword 0 of a read-only GuestBuffers element
+    whose stride, records and format are equal is accepted like a data position and patched into the compiled
+    descriptor (the bufferPatches path of 40bf8d8e2) so Graphics re-points the buffer. Then l3p (trace, `world-l3tc`)
+    for the hit share per kind and a world A/B with base steps; check the menu frames as on 2026-10-30.
+(b) Stop the engine draw cache here (it stays off) and go back to the committer by other means.
+(c) Something else.
 
 How to build and run (learned on 2026-10-30):
-- Build with `ninja -C build core/libs/libs` (plus the test targets you need). The runtime loads the NID-patched
-  libraries from `build/core/libs/libs`; building only `libSceAgcDriver` leaves the old patched driver in place.
-  Deploy with `porter/tools/make-runtime.ps1 -LibsOnly` (refuses while app.exe runs) and record the driver hash it
-  prints in SYSTEM-CHANGES. Start series with `yotei-work/tools/p1-series-1030.ps1 -RunList "<tag>|<scene>" -Name
-  <name>` detached (Win32_Process Create); scenes `world-l3` / `world-l3p` add the hooks and the cache variables.
+- Build with `ninja -C build core/libs/libs` (plus test targets). The runtime loads the NID-patched libraries from
+  `build/core/libs/libs`. Deploy with `porter/tools/make-runtime.ps1 -LibsOnly` (refuses while app.exe runs) and
+  record the driver hash it prints in SYSTEM-CHANGES. Rebuild once after committing, so the driver's revision string
+  names the commit. Start series with `yotei-work/tools/p1-series-1030.ps1 -RunList "<tag>|<scene>" -Name <name>`
+  detached (Win32_Process Create).
+- elem-run.ps1 does not watch the game during its 450 s wait before the plan: after "continue pressed" check that
+  app.exe still runs (the known game crash in app.exe+0x113291f's callee hit l3p2 25 s after CONTINUE).
+- A build of porter/l3-cache changes the shader cache SourceVersion only through the walker files; driver-only changes
+  keep using the warm `C:\AnyPS5-cache-l3`.
 - After the measurements put the play runtime back: `git switch porter/elements`, `ninja -C build core/libs/libs`,
   `make-runtime.ps1 -LibsOnly`, record it. Do that before I play.
-- Line endings: these sources are LF. Python on Windows writes CRLF in text mode; open files with `newline=""`
-  when a script edits them, or the commit rewrites whole files. Bash heredocs mangle backslashes: write scripts
-  with the Write tool. Check `git show --stat` of every commit for whole-file churn.
-- Tests: `porter/tools/p1-tests.sh <log>` (0 failures expected), `build/tests/agc_driver_draw_cache_relocation_tests.exe`,
-  `agc_driver_mesh_draw_relocation_tests.exe`, `agc_driver_recorder_tests.exe --label-clobber-only`; run them from
-  the repo root with `build/core/libs/libs/unpatched` and the MinGW bin first on PATH and no APS5_* variables.
+- Line endings: these sources are LF. Python on Windows writes CRLF in text mode; open files with `newline=""`.
+  Bash heredocs mangle backslashes: write scripts with the Write tool. Check `git show --stat` of every commit.
+- Tests: `porter/tools/p1-tests.sh <log>` (0 failures expected), `build/tests/agc_driver_draw_cache_relocation_tests.exe`
+  (also with `APS5_PORTER_L3_CACHE=1`), `agc_driver_mesh_draw_relocation_tests.exe`,
+  `agc_driver_recorder_tests.exe --label-clobber-only`; from the repo root with `build/core/libs/libs/unpatched` and
+  the MinGW bin first on PATH, `ANYPS5_NO_SHADER_CACHE=1` and no other APS5_* variables. The test executables load the
+  driver DLL from `unpatched`, so a driver rebuild is enough.
 
 Rules that still apply: everything stays local, take the shared locks before game runs, Ghidra jobs and builds
 (`python -I yotei-work/engine/tools/lock.py`), prove claims with checkable evidence, install nothing without asking,
