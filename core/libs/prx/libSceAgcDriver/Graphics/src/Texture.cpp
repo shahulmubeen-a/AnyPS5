@@ -4883,6 +4883,10 @@ StorageTexture::GpuOrderCounts StorageTexture::GpuOrderTotals() {
     return counts;
 }
 
+const char* StorageTexture::CurrentFlushReason() {
+    return flushReason;
+}
+
 void StorageTexture::StoreReadbackBeforeLabel(const char* reason) {
     static const bool disabled = std::getenv("APS5_NO_LABEL_READBACK_STORE") != nullptr;
     if (disabled) return;
@@ -6273,6 +6277,9 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         const auto first = keep.empty() ? descriptor.baseAddress + guestBytes : keep.front().first;
         std::fprintf(stderr, "[flush] image 0x%llx+0x%llx keeps %zu CPU-written 64 KiB blocks (first stored byte at +0x%llx, %zu ranges stored, generation %llu)\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), skipped, static_cast<unsigned long long>(first - descriptor.baseAddress), keep.size(), static_cast<unsigned long long>(generation));
     }
+    // APS5_TRACE_LABEL_CLOBBER: the stored ranges against the labels stored lately, so a wait that times out on
+    // one of them names this write-back (note 0).
+    for (const auto& [from, to] : keep) Recorder::NoteWriteOverLabels(from, to, 0);
     // Taken before this write-back stamps anything (see advanceAdjacent), with the 64 KiB block span
     // its stamps cover.
     const auto firstBlock = firstStored / block;

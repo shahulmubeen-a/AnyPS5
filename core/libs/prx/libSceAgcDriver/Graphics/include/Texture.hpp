@@ -318,6 +318,8 @@ public:
         bool leaseGuardTripped = false;
     };
     static GpuOrderCounts GpuOrderTotals();
+    // The reason of the write-back this thread is storing ("readback before label", "refresh", ...), or null.
+    static const char* CurrentFlushReason();
     static bool AnyPending();
     static void FlushDumpSelected(const char* reason);
     static bool StoreAtFlipRequested(const char* value);

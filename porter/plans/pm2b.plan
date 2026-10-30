@@ -1,0 +1,13 @@
+# pm2b (2026-10-30, pm2 again: pm2 left the menu because its popup press hit CONTINUE; run with -PopupPresses 0): main menu, profiled. With the user's OK the address-based lease wait is skipped by default
+# (lease guard: every 16th lease-covered flush still waits; a stamp there turns lease waits back on). base = the
+# old waits (deferstores off); p1 = new default; noguard = no guard samples (APS5_NO_LEASE_GUARD); leasewait =
+# 590cafaa9's default (APS5_NO_DEFER_OVER_LEASES).
+base-0 60 deferstores off
+p1-1 60
+noguard-1 60 switch APS5_NO_LEASE_GUARD on
+leasewait-1 60 switch APS5_NO_DEFER_OVER_LEASES on
+base-1 60 deferstores off
+p1-2 60
+noguard-2 60 switch APS5_NO_LEASE_GUARD on
+leasewait-2 60 switch APS5_NO_DEFER_OVER_LEASES on
+base-2 60 deferstores off
