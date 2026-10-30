@@ -25,9 +25,13 @@ To do, in this order:
    (Win32_Process Create). Report per step with `yotei-work/tools/plan_gains.py`, `plan_steps_profile.py` and
    `shots_compare.py` (look at the shots: glare, black foliage, missing objects). Check every play and run log for a
    `[defer] lease guard` line.
-2. Look at the freeze of 2026-10-30 10:08 (ws3 run): picking up the Kusarigama in the world stopped all GPU work (0
-   packets per 10 s, title-side stall) with the old waits on. If I played again and hit it, the log is the newest
-   `runs-best/run-play-*.err.log`. Find what the title waits for (thread state, last HLE calls); report before fixing.
+2. First-time content stalls 1-3 minutes: on 2026-10-30 moving the horse into a new area froze the game until one
+   NVIDIA pipeline compile (`nvgpucomp64.dll`) ended, while the title spun waiting (found with
+   `yotei-work/tools/thread_rip_sample.py <pid> <tid,...>`); the Kusarigama freeze was likely the same. Find which
+   pipeline takes that long (shader address, size, spanned wave?) and whether it can compile off the title's path;
+   report before changing anything. Also look at the 8-9 tessellation hull shaders the recompiler refuses in every
+   world run ("tessellation lowering: the hull program uses a lane mask other than its own lane's bit"), a possible
+   cause of the "black tears" I see while playing.
 3. Do not start the cheaper-commits change without my OK.
 
 Rules that still apply: everything stays local, take the shared locks before game runs, Ghidra jobs and builds
