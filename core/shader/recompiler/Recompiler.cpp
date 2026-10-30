@@ -657,6 +657,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.fusedFma = request.target.fusedFma;
     targetOptions.nativeMixF16 = request.target.nativeMixF16;
     targetOptions.nativeF32MinMax = request.target.nativeF32MinMax;
+    targetOptions.nativeF32IsNan = request.target.nativeF32IsNan;
     targetOptions.singleWorkgroup = request.context.compute.has_value() && request.context.compute->singleWorkgroup;
     targetOptions.robustBufferAccess2 = request.target.robustBufferAccess2;
     targetOptions.float32FlushToZero = HardwareFloat32Flush(request);
