@@ -1,0 +1,17 @@
+# pw1 (2026-10-30): world at HOME, unprofiled, a base step (the previous waits: deferstores off) between every variant.
+# p1 = the new default (GPU-ordered write-backs with every P1 condition, ps5-porter 590cafaa9); raw = every condition
+# dropped (last night's "deferstores on", wa1/wd1 ds); lease = P1 without its address-based lease wait.
+# [elem-defer] counts refusals per condition every 10 s (plan_steps_profile.py, second table).
+base-0 100 deferstores off
+p1-1 100
+base-1 100 deferstores off
+raw-1 100 switch APS5_DEFER_UNWATCHED on;;switch APS5_DEFER_OVER_COMPLETIONS on;;switch APS5_DEFER_OVER_LANE on;;switch APS5_DEFER_OVER_LEASES on;;switch APS5_NO_DEFER_KEEP_WRITER on
+base-2 100 deferstores off
+lease-1 100 switch APS5_DEFER_OVER_LEASES on
+base-3 100 deferstores off
+p1-2 100
+base-4 100 deferstores off
+raw-2 100 switch APS5_DEFER_UNWATCHED on;;switch APS5_DEFER_OVER_COMPLETIONS on;;switch APS5_DEFER_OVER_LANE on;;switch APS5_DEFER_OVER_LEASES on;;switch APS5_NO_DEFER_KEEP_WRITER on
+base-5 100 deferstores off
+lease-2 100 switch APS5_DEFER_OVER_LEASES on
+base-6 100 deferstores off

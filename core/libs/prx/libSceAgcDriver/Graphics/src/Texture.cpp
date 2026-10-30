@@ -153,13 +153,21 @@ std::atomic<std::uint64_t> deferredRefreshFlushes{0};
 // refresh deferral alone; the element rule "deferstores on|off" sets it live.
 constexpr std::array<const char*, 7> GpuOrderedReasons{"readback before label", "readback before interrupt", "depth plane store", "storage image creation", "imported buffer region", "written buffer range", "storage refresh"};
 // Cumulative (each report keeps its own last values): deferred flushes by reason, refusals by condition, lease
-// waits kept, blocks left to an unfinished writer.
+// waits kept and those whose completions stamped the stored blocks (a stamp there can change the keep-blocks
+// decision; a wait that stamps nothing decided nothing), blocks left to an unfinished writer.
 std::array<std::atomic<std::uint64_t>, GpuOrderedReasons.size()> gpuOrderedFlushes{};
 enum class GpuOrderRefusal : std::size_t { Unwatched, Completion, Lane, Count };
 std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GpuOrderRefusal::Count)> gpuOrderRefusals{};
-std::atomic<std::uint64_t> gpuOrderLeaseWaits{0}, gpuOrderKeptForWriter{0};
+std::atomic<std::uint64_t> gpuOrderLeaseWaits{0}, gpuOrderLeaseStamped{0}, gpuOrderKeptForWriter{0};
 // Set by FlushPending around the write-backs it records behind the pending writer (the keep-blocks rule).
 thread_local bool gpuOrderedWriteBack = false;
+
+// APS5_VERIFY_FLUSH_LANE_WAIT=1: a lane-targeted writer wait throws when it left a batch that writes or leases the
+// stored range unfinished (yotei/best 18050a3a4).
+bool FlushLaneWaitVerified() {
+    static const bool verified = std::getenv("APS5_VERIFY_FLUSH_LANE_WAIT") != nullptr;
+    return verified;
+}
 
 // The index of `reason` in GpuOrderedReasons, or -1.
 int GpuOrderedReason(const char* reason, bool refresh) {
@@ -249,7 +257,7 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     }
     const auto order = StorageTexture::GpuOrderTotals();
     char kept[256];
-    std::snprintf(kept, sizeof(kept), "; kept waiting: unwatched %llu, completions %llu, lane %llu; lease waits %llu; blocks left to a pending writer %llu", static_cast<unsigned long long>(order.unwatched - lastOrder.unwatched), static_cast<unsigned long long>(order.completions - lastOrder.completions), static_cast<unsigned long long>(order.lane - lastOrder.lane), static_cast<unsigned long long>(order.leaseWaits - lastOrder.leaseWaits), static_cast<unsigned long long>(order.keptForWriter - lastOrder.keptForWriter));
+    std::snprintf(kept, sizeof(kept), "; kept waiting: unwatched %llu, completions %llu, lane %llu; lease waits %llu (%llu stamped the stored blocks); blocks left to a pending writer %llu", static_cast<unsigned long long>(order.unwatched - lastOrder.unwatched), static_cast<unsigned long long>(order.completions - lastOrder.completions), static_cast<unsigned long long>(order.lane - lastOrder.lane), static_cast<unsigned long long>(order.leaseWaits - lastOrder.leaseWaits), static_cast<unsigned long long>(order.leaseStamped - lastOrder.leaseStamped), static_cast<unsigned long long>(order.keptForWriter - lastOrder.keptForWriter));
     ordered += kept;
     lastOrder = order;
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
@@ -4501,12 +4509,35 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
             if (pendingWriter(*recorder) != 0) {
                 recorder->Reap();
                 const auto writer = pendingWriter(*recorder);
-                if (leaseWait && writer != 0) gpuOrderLeaseWaits.fetch_add(1, std::memory_order_relaxed);
-                if (writer == recorder->OpenSerial()) {
+                const auto generationBefore = leaseWait && writer != 0 ? GuestMemory::TrackerGeneration() : 0;
+                // Per lane (Recorder::FinishWritersByLane): image producers and the write-back record in lane 0, so
+                // the other lane reaches the stored range only through its noted writes and leases.
+                const bool byLane = !RuntimeSwitches::Set(RuntimeSwitch::NoFlushLaneWait);
+                if (writer != 0 && byLane) {
+                    std::uint64_t leaseBegin = 0, leaseEnd = 0;
+                    if (publishes) {
+                        constexpr std::uint64_t block = 65536;
+                        constexpr auto top = std::numeric_limits<std::uint64_t>::max();
+                        const auto end = bytes > top - address ? top : address + bytes;
+                        leaseBegin = address / block * block;
+                        leaseEnd = end > top - block ? end : (end + block - 1) / block * block;
+                    }
+                    Recorder::CountSync(writer == recorder->OpenSerial() ? (openWrites(*recorder) ? 1 : 3) : 0);
+                    recorder->FinishWritersByLane(stored, leaseBegin, leaseEnd, leaseWait);
+                    if (FlushLaneWaitVerified() && recorder->WritersPendingOver(stored, leaseBegin, leaseEnd, leaseWait)) {
+                        char message[256];
+                        std::snprintf(message, sizeof(message), "AGC graphics: a lane-targeted flush wait for 0x%llx+0x%zx (%s) left a batch that writes or leases the stored range unfinished", static_cast<unsigned long long>(address), bytes, reason != nullptr ? reason : "?");
+                        throw std::runtime_error(message);
+                    }
+                } else if (writer == recorder->OpenSerial()) {
                     Recorder::CountSync(openWrites(*recorder) ? 1 : 3);
                     recorder->Sync();
                 } else if (writer != 0) {
                     recorder->FinishUpTo(writer);
+                }
+                if (leaseWait && writer != 0) {
+                    gpuOrderLeaseWaits.fetch_add(1, std::memory_order_relaxed);
+                    if (std::any_of(stored.begin(), stored.end(), [&](const auto& range) { return range.second > range.first && GuestMemory::WrittenSince(range.first, static_cast<std::size_t>(range.second - range.first), generationBefore); })) gpuOrderLeaseStamped.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         } catch (...) {
@@ -4810,6 +4841,7 @@ StorageTexture::GpuOrderCounts StorageTexture::GpuOrderTotals() {
     counts.completions = gpuOrderRefusals[static_cast<std::size_t>(GpuOrderRefusal::Completion)].load(std::memory_order_relaxed);
     counts.lane = gpuOrderRefusals[static_cast<std::size_t>(GpuOrderRefusal::Lane)].load(std::memory_order_relaxed);
     counts.leaseWaits = gpuOrderLeaseWaits.load(std::memory_order_relaxed);
+    counts.leaseStamped = gpuOrderLeaseStamped.load(std::memory_order_relaxed);
     counts.keptForWriter = gpuOrderKeptForWriter.load(std::memory_order_relaxed);
     return counts;
 }

@@ -404,6 +404,18 @@ public:
     // Whether a batch of `lane` (open or in flight) holds a writer PendingWriterSerial would find over the range: a
     // noted write or an address-based lease. The deferred storage write-backs' lane condition (Texture.cpp).
     bool LaneWriterOverlaps(int lane, std::uint64_t address, std::size_t bytes) const;
+    // A storage flush's writer wait (Texture.cpp FlushPending), per lane: finishes the batches up to the newest one
+    // whose noted writes or address-based leases overlap `ranges` (or whose lease overlaps [leaseBegin, leaseEnd)),
+    // submitting a lane's open batch when it is that one; the other lane's batches stay in flight. `leasesOnly`:
+    // only address-based leases count (the lease wait of a GPU-ordered write-back). Ported from yotei/best
+    // 18050a3a4; the runtime switch APS5_NO_FLUSH_LANE_WAIT waits for both lanes (Sync / FinishUpTo) as before.
+    struct WriterWait {
+        std::array<std::uint64_t, 2> targets{};
+        std::size_t leftInFlight = 0;
+        std::size_t leftOpen = 0;
+    };
+    WriterWait FinishWritersByLane(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, std::uint64_t leaseBegin, std::uint64_t leaseEnd, bool leasesOnly = false);
+    bool WritersPendingOver(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, std::uint64_t leaseBegin, std::uint64_t leaseEnd, bool leasesOnly = false) const;
     // What SyncThrough(address, bytes) would wait for, for the [hooksync] attribution: the newest
     // batch whose noted range overlaps the access (the open batch counts first, with the serial it
     // will get), whether that batch's fence has already signaled (its GPU work is done, so the
@@ -1091,6 +1103,7 @@ private:
     void removeLabels(Batch& batch);
     void release(Batch& batch) noexcept;
     static bool overlaps(const Batch& batch, std::uint64_t address, std::uint64_t end);
+    static bool writesOver(const Batch& batch, std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, std::uint64_t leaseBegin, std::uint64_t leaseEnd, bool leasesOnly);
     static std::optional<ReadKind> readOverlap(const Batch& batch, std::uint64_t address, std::uint64_t end, std::optional<ReadKind> only = std::nullopt);
     static std::vector<std::pair<std::uint64_t, std::uint64_t>> notedReads(const Batch& batch);
     bool signaled(const Batch& batch) const;

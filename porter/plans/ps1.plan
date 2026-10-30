@@ -1,0 +1,14 @@
+# ps1 (2026-10-30): main menu, profiled, after the lane-targeted flush wait (port of yotei/best 18050a3a4) and the
+# "stamped" count of lease waits were added. p1 = new defaults (GPU-ordered write-backs, every P1 condition, writer
+# and lease waits per lane); p1full = the same with both lanes waited for (APS5_NO_FLUSH_LANE_WAIT, = pm1's p1);
+# lease = no lease wait; base = the old waits (deferstores off), per lane. [elem-defer] "stamped": lease waits whose
+# completions stamped the stored blocks (only those could change a keep-blocks decision).
+p1-0 60
+p1full-1 60 switch APS5_NO_FLUSH_LANE_WAIT on
+lease-1 60 switch APS5_DEFER_OVER_LEASES on
+base-1 60 deferstores off
+p1-1 60
+p1full-2 60 switch APS5_NO_FLUSH_LANE_WAIT on
+lease-2 60 switch APS5_DEFER_OVER_LEASES on
+base-2 60 deferstores off
+p1-2 60

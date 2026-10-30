@@ -1,0 +1,14 @@
+# pm1 (2026-10-30): main menu (benchmark scene), profiled (APS5_PROFILE_DRAW). GPU-ordered storage write-backs (P1,
+# ps5-porter 590cafaa9) are now the default: a step without control lines runs them with every P1 condition. base =
+# the previous waits (deferstores off = APS5_NO_DEFER_STORES); raw = every P1 condition dropped (last night's
+# unconditioned "deferstores on", ma1/ma2 ds); lease = P1 without its address-based lease wait. Per step:
+# plan_steps_profile.py (second table: [elem-defer] refusals per condition).
+base-0 60 deferstores off
+p1-1 60
+raw-1 60 switch APS5_DEFER_UNWATCHED on;;switch APS5_DEFER_OVER_COMPLETIONS on;;switch APS5_DEFER_OVER_LANE on;;switch APS5_DEFER_OVER_LEASES on;;switch APS5_NO_DEFER_KEEP_WRITER on
+lease-1 60 switch APS5_DEFER_OVER_LEASES on
+base-1 60 deferstores off
+p1-2 60
+raw-2 60 switch APS5_DEFER_UNWATCHED on;;switch APS5_DEFER_OVER_COMPLETIONS on;;switch APS5_DEFER_OVER_LANE on;;switch APS5_DEFER_OVER_LEASES on;;switch APS5_NO_DEFER_KEEP_WRITER on
+lease-2 60 switch APS5_DEFER_OVER_LEASES on
+base-2 60 deferstores off

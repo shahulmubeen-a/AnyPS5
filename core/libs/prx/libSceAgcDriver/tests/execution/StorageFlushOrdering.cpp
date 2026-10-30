@@ -49,7 +49,15 @@ class OrderCounts {
 public:
     StorageTexture::GpuOrderCounts Added() const {
         const auto now = StorageTexture::GpuOrderTotals();
-        return {now.deferred - before.deferred, now.unwatched - before.unwatched, now.completions - before.completions, now.lane - before.lane, now.leaseWaits - before.leaseWaits, now.keptForWriter - before.keptForWriter};
+        StorageTexture::GpuOrderCounts added;
+        added.deferred = now.deferred - before.deferred;
+        added.unwatched = now.unwatched - before.unwatched;
+        added.completions = now.completions - before.completions;
+        added.lane = now.lane - before.lane;
+        added.leaseWaits = now.leaseWaits - before.leaseWaits;
+        added.leaseStamped = now.leaseStamped - before.leaseStamped;
+        added.keptForWriter = now.keptForWriter - before.keptForWriter;
+        return added;
     }
 
 private:

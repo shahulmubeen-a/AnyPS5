@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the execution tests that research-committer-syncs.md lists for the GPU-ordered storage write-backs (P1),
+# Runs the execution tests that research-committer-syncs.md lists for the GPU-ordered storage write-backs (P1), and
+# the lane-targeted flush wait test ported from yotei/best 18050a3a4,
 # with the CTest environment of libSceAgcDriver/CMakeLists.txt (ANYPS5_NO_SHADER_CACHE=1, repo root as working
 # directory, libc's directory first on PATH) and no other APS5_* variable. Every test runs once with the new
 # default and once with APS5_NO_DEFER_STORES=1 (the waits as before). VALIDATE=1 adds the Khronos validation layer
@@ -25,6 +26,9 @@ cases=(
   "copied_writer_label_order|agc_driver_copied_writer_label_order_tests|||pass"
   "copied_writer_label_order_drain|agc_driver_copied_writer_label_order_tests||APS5_DRAIN_COMPLETION_LABELS=1|pass"
   "storage_read_during_idle_store|agc_driver_storage_read_during_idle_store_tests|||pass"
+  "storage_flush_lane_wait|agc_driver_storage_flush_lane_wait_tests|||pass"
+  "storage_flush_lane_wait_off|agc_driver_storage_flush_lane_wait_tests||APS5_NO_FLUSH_LANE_WAIT=1|fail"
+  "storage_flush_lane_wait_verify|agc_driver_storage_flush_lane_wait_tests||APS5_VERIFY_FLUSH_LANE_WAIT=1|pass"
 )
 for mode in default no-defer; do
   for entry in "${cases[@]}"; do
@@ -34,7 +38,7 @@ for mode in default no-defer; do
     [ "$mode" = no-defer ] && envs+=(APS5_NO_DEFER_STORES=1)
     [ "${VALIDATE:-0}" = 1 ] && envs+=(ANYPS5_REQUIRE_VULKAN=1 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation)
     start=$(date +%s.%N)
-    output=$(env "${envs[@]}" timeout 180 "$tests/$exe.exe" $args 2>&1)
+    output=$(env "${envs[@]}" timeout 120 "$tests/$exe.exe" $args 2>&1)
     code=$?
     seconds=$(awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')
     if [ "$code" -eq 77 ]; then verdict=skip

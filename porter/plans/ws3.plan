@@ -1,0 +1,17 @@
+# ws3 (2026-10-30): world at HOME, unprofiled, a base step between every variant; base = the old behaviour exactly
+# (deferstores off, both lanes waited for). p1 = new defaults (GPU-ordered write-backs with every P1 condition,
+# lane-targeted writer and lease waits); p1full = P1 with both lanes waited for; lease = P1 without the lease wait.
+# [elem-defer] "stamped" counts lease waits whose completions stamped the stored blocks (cutscene and HOME).
+base-0 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+p1-1 100
+base-1 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+p1full-1 100 switch APS5_NO_FLUSH_LANE_WAIT on
+base-2 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+lease-1 100 switch APS5_DEFER_OVER_LEASES on
+base-3 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+p1-2 100
+base-4 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+p1full-2 100 switch APS5_NO_FLUSH_LANE_WAIT on
+base-5 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
+lease-2 100 switch APS5_DEFER_OVER_LEASES on
+base-6 100 deferstores off;;switch APS5_NO_FLUSH_LANE_WAIT on
