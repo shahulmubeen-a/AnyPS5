@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Queues/WorkerAffinity.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
@@ -345,6 +346,7 @@ DrawPipeline::Item* DrawPipeline::nextPrepare() {
 
 void DrawPipeline::prepareLoop() {
     PerformanceTrace::BindThread("draw preparer");
+    NoteCriticalThread(CriticalThread::Preparer);
     for (;;) {
         Prepare job;
         Elements::Tag element;
@@ -545,6 +547,7 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
 
 void DrawPipeline::run() {
     PerformanceTrace::BindThread("draw committer");
+    NoteCriticalThread(CriticalThread::Committer);
     StartCommitterSampler();
     GuestMemory::MarkGpuLockPriorityThread();
     for (;;) {
