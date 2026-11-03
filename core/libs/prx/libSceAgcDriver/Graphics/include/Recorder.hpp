@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RECORDER_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RECORDER_HPP
 
+#include "prx/libSceAgcDriver/Graphics/include/PendingWriteRanges.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BarrierBatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PassHazards.hpp"
@@ -292,6 +293,22 @@ public:
     // lane's earlier-opened batch completed, while the first one still read it.
     // RetiredSerial() (a use noted at UseSerial()) is capped the same way when a batch finishes.
     std::uint64_t CompletedThrough() const;
+    static constexpr std::size_t MaxStreams = 16;
+    using Token = std::array<std::uint64_t, MaxStreams>;
+    static constexpr std::size_t LaneStreams = 2;
+    Token CallerToken() const;
+    Token AllToken() const;
+    static std::uint64_t TokenThrough(const Token& token);
+    bool TokenReached(const Token& token) const;
+    void FinishToken(const Token& token);
+    class CommandInHand {
+    public:
+        CommandInHand();
+        ~CommandInHand();
+        CommandInHand(const CommandInHand&) = delete;
+        CommandInHand& operator=(const CommandInHand&) = delete;
+    };
+    static bool CommandBufferInHand();
     // Under the mutex, async lane only: the calling thread's lane's open (or next) batch waits on the
     // GPU for everything lane `from` recorded so far (its open batch is submitted first).
     void OrderAfterLane(int from);
@@ -321,8 +338,35 @@ public:
     static constexpr std::size_t DrawInputEntries = 16384;
     std::shared_ptr<Buffer> UnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp, VkDeviceSize* offset = nullptr);
     void NoteUnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp, std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0);
-    std::shared_ptr<Buffer> ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr, std::uint64_t generation = 0);
+    std::shared_ptr<Buffer> ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr, std::uint64_t generation = 0, VkDeviceSize* offset = nullptr);
+    static constexpr std::size_t ContainingSnapshotProbes = 16;
     void KeepDrawSnapshot(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint64_t registryGeneration, std::shared_ptr<Buffer> buffer, SnapshotUse use = SnapshotUse::Storage, std::uint32_t derived = 0);
+    // Owned draw snapshots (APS5_NO_OWNED_DRAW_SNAPSHOTS=1 off; an APS5_AB switch). A read-only draw
+    // input outside the write watch (CollectWrites 0: host imports compared, not watched) had no
+    // proof that it was unchanged, so every draw copied it whole into a new buffer. Its blocks are
+    // armed with owned words (GuestMemory::ArmOwnedBlocks) before the copy; the copy is current
+    // while OwnedProofHolds at the tracker generation read before the copy (no CPU store since the
+    // arming, no stamp or untracked hint newer), the registry and the forget serial are unchanged.
+    // The caller checks the pending writes first, as for every draw snapshot. An entry whose
+    // words moved backs off arming (2^n - 1 misses, n <= 6); a hit clears the back-off.
+    // `arm`: whether the caller should arm and keep its copy.
+    static constexpr std::size_t OwnedSnapshotBudget = std::size_t{1024} << 20u;
+    // Vertex and index inputs (CopyDrawInput, APS5_NO_OWNED_VERTEX_INPUTS=1 off) share the cache, keyed
+    // by their use as well and keeping the derived word (an index buffer's highest index).
+    // APS5_VERIFY_OWNED_SNAPSHOTS=<n>: the first n hits per 10 s also compare the copy with guest
+    // memory (counted, a difference printed).
+    static constexpr std::size_t OwnedSnapshotEntries = 16384;
+    enum class OwnedSnapshotMiss : std::uint8_t { None, Absent, BackingOff, WordsMoved, StampsMoved, Mapping, Count };
+    std::shared_ptr<Buffer> OwnedDrawSnapshot(std::uint64_t address, std::size_t bytes, bool& arm, OwnedSnapshotMiss& miss, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr);
+    void KeepOwnedDrawSnapshot(std::uint64_t address, std::size_t bytes, std::vector<std::uint64_t> words, std::uint64_t since, std::uint64_t registryGeneration, std::uint64_t forgetSerial, std::shared_ptr<Buffer> buffer, SnapshotUse use = SnapshotUse::Storage, std::uint32_t derived = 0);
+    void RefuseOwnedDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage);
+    static std::array<std::uint64_t, 2> OwnedSnapshotVerifyCounts();
+    std::size_t OwnedSnapshotBytes() const { return ownedSnapshotBytes; }
+    // Whether the storage snapshot held for the range is stale only through the driver's stamps (GPU writes, its own
+    // in-order stores), with no CPU store collected since: the caller collected the range first. Then the draw binds the
+    // range in place (its reads are noted pending, so a CPU-side store over them waits or goes to the GPU in order) and
+    // the snapshot is left as it is, neither refreshed nor dropped.
+    bool DrawSnapshotGpuWrittenOnly(std::uint64_t address, std::size_t bytes) const;
     static constexpr std::size_t DrawUploadChunk = std::size_t{1} << 20u;
     struct UploadSlice {
         std::shared_ptr<Buffer> buffer;
@@ -332,6 +376,12 @@ public:
     UploadSlice DrawUpload(std::size_t bytes);
     static constexpr std::size_t IndexRangeEntries = 16384;
     static constexpr std::size_t KeptIndexRangeIndices = 4096;
+    // C68: the kept highest index of the range when it is stale only through the driver's stamps (GPU writes; the
+    // caller collected the range's CPU stores first); the entry stays as it is. Nothing when none is kept, the
+    // registry moved, it is current, or a CPU store stamped a changed block.
+    std::optional<std::optional<std::uint32_t>> GpuWrittenHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use) const;
+    // The generation the kept highest index of the range was read at (0 when none is kept).
+    std::uint64_t KeptHighestIndexGeneration(std::uint64_t address, std::size_t bytes, SnapshotUse use) const;
     bool KnownHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::optional<std::uint32_t>& highest);
     void KeepHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint64_t generation, std::uint64_t registryGeneration, std::optional<std::uint32_t> highest);
     void OnComplete(std::function<void()> action);
@@ -342,6 +392,9 @@ public:
     // Notes several [begin, end) ranges and publishes the snapshot once (a dispatch writes many buffers).
     void NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
     bool PendingWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
+    // Whether a pending write over the range is in a batch of the other lane than the calling
+    // thread's (open, or in flight): this lane's own pending writers run before what it records next.
+    bool PendingWriteOtherLane(std::uint64_t address, std::size_t bytes) const;
     // Whether no unfinished batch writes the range any more: no open-batch overlap, and every
     // overlapping in-flight batch's fence has signaled (its in-place GPU stores are final in host
     // memory; its completion stores are the caller's business, see VulkanDevice::CopyBuffer).
@@ -400,6 +453,7 @@ public:
     // Whether the OPEN (unsubmitted) batch writes the range: a wait on such a range must submit it.
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t PendingWriterSerial(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t PendingWriterSerial(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> exceptNotes) const;
     std::uint64_t PendingLeaseSerial(std::uint64_t address, std::size_t bytes) const;
     // Whether a batch of `lane` (open or in flight) holds a writer PendingWriterSerial would find over the range: a
     // noted write or an address-based lease. The deferred storage write-backs' lane condition (Texture.cpp).
@@ -483,6 +537,7 @@ public:
     // Submits the open batch and returns the serial of the newest submitted batch (0 when nothing was
     // ever submitted); WaitSerial(serial) then covers all recorded work.
     std::uint64_t SubmitAndEpoch();
+    std::uint64_t OpenBatchSerial();
     bool HasTimeline() const { return timeline != VK_NULL_HANDLE; }
     bool RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments, const std::array<std::uint32_t, 3>* threadGroup = nullptr);
     // Waits until every batch up to `serial` completed on the GPU. Called WITHOUT GuestMemory::GpuMutex:
@@ -507,6 +562,7 @@ public:
     std::uint64_t SamplesTotal();
     bool DumpSamples(VkDeviceAddress target, std::uint64_t address = 0);
     void NoteSampledDraw(VkCommandBuffer commands);
+    void NoteDrawTraceToken(std::uint64_t token) noexcept;
     bool QueuesSampleDumps() const;
     void PrepareSampleSlot();
     void EndPassSamples();
@@ -807,6 +863,9 @@ public:
     static void AddGpuTiming(CommandClass which, double nanoseconds, std::uint64_t bytes);
     // Presentations, so the [gputime] class totals can be given per present.
     static void CountPresent();
+    // APS5_PROFILE_GPU: prints the [gputime] line of the batches read so far as the window `label`
+    // and starts the next window (ProfileWindows::Close; nothing when the timing is off).
+    static void CloseGpuTimingWindow(const char* label);
     // Presentations so far (never reset): a frame clock for policies that count per frame, such as
     // StorageTexture's write-back hysteresis.
     static std::uint64_t Presents();
@@ -1010,6 +1069,8 @@ private:
             std::uint64_t end;
         };
         std::vector<KeyStore> keyStores;
+        std::vector<std::uint64_t> drawTraceTokens;
+        std::unordered_set<std::uint64_t> drawTraceTokenSet;
     };
     struct LabelEntry {
         std::uint32_t value;
@@ -1216,6 +1277,14 @@ private:
     void takeOwedEdge();
     // Submits `lane`'s open batch (from any thread's lane).
     void submitLane(int lane);
+    // Before a blocking CPU wait for `awaited` (in flight, fence unsignaled): submits the other
+    // lane's open batch. The two rings run side by side on the hardware, so the awaited work may
+    // wait on the GPU for (spin on memory written by) the other ring's later work; left open, that
+    // work reaches the GPU only through a submit by this thread, which holds the GPU mutex every
+    // other driver thread queues on (the #675 lane-1 freeze: FinishWritersByLane -> finish on a
+    // lane-1 batch, lane 0 open). Async lane only (APS5_NO_LANE_OPEN_WAIT=1: as before).
+    void submitOtherLaneBeforeWait(const Batch& awaited);
+    void submitOtherLaneBeforeWait(int lane, std::uint64_t serial);
     // The edges this thread's consumed labels owe (NoteConsumedLabel), applied to the open batch.
     void applyConsumedLabels();
     // The newest in-flight batch of `lane`, or null.
@@ -1236,6 +1305,7 @@ private:
     // snapshot (a rebuild from inside a completion must not drop them) until finish returns.
     std::vector<const Batch*> finishing;
     mutable std::shared_ptr<const WriteRanges> published;
+    mutable ::AgcDriver::Graphics::PendingWriteRanges pendingWriteRanges;
     std::uint64_t submissions = 0;
     std::atomic<std::uint64_t> submittedSerial{0};
     std::atomic<std::uint64_t> retiredSerial{0};
@@ -1275,6 +1345,23 @@ private:
         VkDeviceSize offset = 0;
     };
     std::unordered_map<std::uint64_t, UnwrittenSnapshot> unwrittenSnapshots;
+    using OwnedSnapshotKey = std::tuple<std::uint64_t, std::size_t, SnapshotUse>;
+    struct OwnedSnapshot {
+        std::vector<std::uint64_t> words;
+        std::uint64_t since = 0;
+        std::uint64_t registryGeneration = 0;
+        std::uint64_t forgetSerial = 0;
+        std::shared_ptr<Buffer> buffer;
+        std::list<OwnedSnapshotKey>::iterator recent;
+        std::uint8_t backoff = 0;
+        std::uint16_t skip = 0;
+        std::uint32_t derived = 0;
+    };
+    std::map<OwnedSnapshotKey, OwnedSnapshot> ownedSnapshots;
+    std::list<OwnedSnapshotKey> ownedSnapshotRecency;
+    std::size_t ownedSnapshotBytes = 0;
+    OwnedSnapshot& ownedSnapshotEntry(const OwnedSnapshotKey& key);
+    void dropOwnedSnapshotBuffer(OwnedSnapshot& entry);
     std::array<std::uint64_t, 3> unwrittenStamp{};
     std::size_t unwrittenBytes = 0;
     void retireUnwrittenSnapshots(const std::array<std::uint64_t, 3>& stamp);
@@ -1289,8 +1376,7 @@ private:
     std::map<DrawSnapshotKey, IndexRange> indexRanges;
     std::list<DrawSnapshotKey> indexRangeRecency;
     bool refreshDrawSnapshot(DrawSnapshot& entry, std::uint64_t address, std::size_t bytes);
-    mutable std::weak_ptr<const WriteRanges> publishedWriteRanges;
-    mutable bool publishedWriteRangesValid = false;
+    std::shared_ptr<Buffer> containingDrawSnapshot(std::uint64_t address, std::size_t bytes, VkDeviceSize* offset);
 };
 
 }

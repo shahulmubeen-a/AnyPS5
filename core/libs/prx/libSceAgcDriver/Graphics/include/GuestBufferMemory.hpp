@@ -6,6 +6,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -24,6 +25,9 @@ struct Commitment;
 namespace AgcDriver::Graphics {
 
 void ShutdownGuestBufferWorkers();
+
+// AcquireRegisteredCached outcomes, cumulative (see there).
+std::array<std::atomic<std::uint64_t>, 7>& CachedAcquireOutcomes();
 
 struct GuestMemorySnapshot {
     std::uint64_t address;
@@ -48,6 +52,7 @@ struct HostImport {
     // Identity for the life of this import (see HostImportSerial); 0 until first asked for.
     std::uint64_t serial = 0;
     bool unwatched = false;
+    bool settleOnDemand = false;
     bool dmaBuf = false;
     bool joined = false;
     std::shared_ptr<void> chunk;
@@ -120,6 +125,7 @@ struct HostImportLookupCache {
     std::uint64_t inserts = 0;
 };
 const HostImport* HostImportForCached(const Context& context, std::uint64_t address, std::size_t bytes, HostImportLookupCache& cache);
+bool WatchedAfterSettle(const Context& context, std::uint64_t address, std::size_t bytes);
 void SetHostImportWindow(std::uint64_t bytes);
 // Tests: the window of one large registered range (64 MiB) and the import budget (0: the configured one).
 void SetHostImportRangeWindow(std::uint64_t bytes);
@@ -151,6 +157,7 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 // made outside the device lock (a sampled texture's path, a dispatch's pre-sync); the path taken
 // re-checks with HostImportFor when it binds the import.
 bool HostImportCovers(const Context& context, std::uint64_t address, std::size_t bytes);
+bool ComparedHostImportCovers(const Context& context, std::uint64_t address, std::size_t bytes);
 struct RegisteredPiece {
     std::uint64_t address;
     std::uint64_t bytes;
@@ -198,6 +205,15 @@ struct HostImportsProof {
 bool HostImportsUnchanged(const Context& context, const HostImportsProof& proof);
 // The table's identity when it is reconciled with the live registry (one lock), else empty.
 HostImportsProof HostImportsIdentity(const Context& context);
+
+struct HostImportSnapshot {
+    VkDevice device = VK_NULL_HANDLE;
+    std::uint64_t epoch = 0;
+    std::uint64_t inserts = 0;
+    std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
+};
+std::uint64_t HostImportsVersion(VkDevice device);
+HostImportSnapshot HostImportRanges(const Context& context);
 
 // Identity of the read-only image mirror serving [address, address + bytes) (the counterpart of
 // HostImportSerial for main-image ranges, which no import serves): a serial unique for the life of
@@ -304,6 +320,8 @@ struct AddressCopy {
     std::uint64_t end;
     std::uint64_t committed;
     const char* reason;
+    bool heap = false;
+    bool overBudget = false;
 };
 std::string AddressCopyOverflow(std::vector<AddressCopy> copies, std::uint64_t limit);
 
@@ -312,6 +330,11 @@ public:
     explicit GuestBufferMemory(const Context& context);
     ~GuestBufferMemory();
     void AcquireRegistered();
+    // AcquireRegistered for a draw build's stage A off the device lock (the S1 preparer, an
+    // address-based draw): takes the cached address space only when it is current (device,
+    // registry generation, imports epoch) and has no mirrors to refresh, which needs the lock;
+    // false (nothing taken) otherwise. UploadFinish re-checks the imports epoch as for any build.
+    bool AcquireRegisteredCached();
     // APS5_PROFILE_DRAW: the parts of one address-based build ([address] line every 10 s): the
     // registry lease, the imports pass, the mirror preparation and the mirror compare (blocks and
     // copied blocks) are timed by AcquireRegistered on the calling thread; the caller adds the
@@ -394,6 +417,35 @@ public:
     // regions was recorded (ShaderResources::MarkGpuWrites), under GuestMemory::GpuMutex. A use that
     // never calls it (a synchronous draw) stores the staging bytes from the CPU in WriteBack.
     void RecordCopyBacks(Recorder& recorder);
+    // GPU-sourced buffers (opt-in: APS5_GPU_SOURCED_DRAW_BUFFERS=1, APS5_IMPORT_SOURCED_COPY_IN=1
+    // for the copy-in side; APS5_AB switches). A staged region whose copy-in found no pending writer
+    // and whose copy-back marks found nothing stored over it since the copy-in (MarkOwnWrites) is
+    // registered with its device-local shadow: until a later store (CPU or driver, any stamp after
+    // the marks, a CPU stamp after the copy-in) or the shadow's next copy-in, the shadow holds exactly
+    // the import's bytes. FindGpuSource answers a range inside one such region on the same lane once
+    // the batch that wrote it completed; a draw binds the shadow instead of copying the bytes on the
+    // CPU, a copy-in copies from it instead of a CPU snapshot of the import. Nullopt and `miss` say
+    // why not.
+    enum class GpuSourceMiss : std::uint8_t { None, NoSource, Partial, Released, Pending, Lane, Align, Registry, Stored, Cpu, Count };
+    struct GpuSource {
+        std::shared_ptr<Buffer> buffer;
+        VkDeviceSize offset = 0;
+        std::uint64_t since = 0;
+    };
+    static std::optional<GpuSource> FindGpuSource(std::uint64_t address, std::size_t bytes, VkDeviceSize alignment, GpuSourceMiss& miss);
+    static const char* GpuSourceMissName(GpuSourceMiss miss);
+    static bool GpuSourcedDrawBuffers();
+    static bool ImportSourcedCopyIn();
+    // APS5_PROFILE_DRAW: a draw buffer bound GPU-side or copied (bytes), a miss by reason, and the
+    // [gpu-sourced] line every 10 s. APS5_VERIFY_GPU_SOURCED=<n>: the first n GPU-side binds per 10 s
+    // also copy the import on the CPU and compare it with the bound shadow once the draw's batch ran.
+    static void CountDrawBuffer(bool gpuSide, std::size_t bytes, GpuSourceMiss miss);
+    static bool VerifyGpuSourceTurn();
+    static void CountGpuSourceVerify(bool same);
+    static void ReportGpuSources();
+    static std::size_t GpuSourceEntries();
+    static std::uint64_t GpuSourcedCopyIns();
+    static std::array<std::uint64_t, 2> GpuSourceVerifyCounts();
     // Whether a region is copied out of an import by the GPU (RecordCopyBacks has work).
     bool HasGpuCopies() const {
         for (const auto& region : regions) if (region.gpuCopy) return true;
@@ -411,6 +463,7 @@ public:
     // through a device-local staging copy of the import (nothing was copied through the CPU, so the
     // upload can serve a later identical build), else nothing.
     std::optional<std::vector<std::pair<std::uint64_t, std::uint64_t>>> DirectRegions() const;
+    bool ResidencyBound(std::uint64_t begin, std::uint64_t end) const;
     struct CutRegion {
         std::uint64_t begin;
         std::uint64_t end;
@@ -422,6 +475,10 @@ public:
     // the GPU copies out of an import (gpuCopy) notes its read itself when the copy is recorded.
     // For the recorder's read tracking (ShaderResources::MarkGpuWrites); nothing once committed.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> InPlaceReads() const;
+    // APS5_PROFILE_RESIDENT_CENSUS: notes what this use reaches (ResidentCensus): its regions
+    // copied per build (staged) or served in place, an address-based build's leased heaps (its own
+    // lease and its space's), and its written ranges; nothing before the upload or once committed.
+    void NoteResidentCensus() const;
     void InPlaceReads(std::vector<std::pair<std::uint64_t, std::uint64_t>>& out) const;
     struct SplitReads {
         std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> space;
@@ -469,6 +526,7 @@ private:
         bool hostBacked = false;
         // Set when the region is served by an imported allocation; nothing is copied or written back.
         const HostImport* direct = nullptr;
+        std::shared_ptr<HostImport> residencySlot {};
         // Set when the region covers uncommitted pages: only the `backed` parts (possibly none) are guest
         // memory; the rest reads as zeros and is never stored.
         bool sparse = false;
@@ -510,9 +568,23 @@ private:
         // mapping, so nothing is ever stored from it by the CPU, and the region is taken even when
         // the import could bind it in place.
         bool deviceLocal = false;
+        // The tracker generation and registry generation at this use's copy-in when it may become a
+        // GPU source (FindGpuSource), else 0; consumed by MarkDirectWrites.
+        mutable std::uint64_t gpuSourceSince = 0;
+        mutable std::uint64_t gpuSourceRegistry = 0;
+        // Outside the write watch: the owned words armed at the copy-in (a CPU store moves them).
+        mutable std::vector<std::uint64_t> gpuSourceWords {};
+        // What the last registered source learned (bit 0 a draw or copy-in used it, bit 1 a CPU
+        // store moved its words), and the back-off of uses that do not try (2^n - 1 skipped).
+        mutable std::shared_ptr<std::atomic<std::uint8_t>> gpuSourceFeedback {};
+        mutable std::uint8_t gpuSourceBackoff = 0;
+        mutable std::uint16_t gpuSourceSkip = 0;
         // The device refused the shadow (memory or allocations exhausted): the region takes the
         // path it would take without staging, in both upload stages.
         bool unstaged = false;
+        // The gpuCopy buffer is a resident range's persistent buffer (see residentBuffer in
+        // GuestBufferMemory.cpp): its copy-in is skipped while the buffer still matches guest memory.
+        bool resident = false;
         // A written descriptor range of an address-based build that lies inside one of the space's
         // import regions, given a region of its own so it can be staged device-local (see
         // resolveOverlays); the BDA table sends its guest addresses to this region's buffer instead
@@ -596,6 +668,7 @@ private:
     std::uint64_t importsEpoch = 0;
     std::uint64_t importFloor = 0;
     std::vector<Region> regions;
+    bool anyResidencySlot = false;
     // Whether `regions` is in ascending address order (true right after AcquireRegistered, whose
     // regions follow the registry's order), so AddSnapshot can search instead of scanning.
     bool regionsSorted = false;

@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string_view>
 
 namespace AgcDriver::Graphics {
@@ -45,6 +46,7 @@ struct DeviceLibraries {
     std::map<Key, VkPipelineLayout> layouts;
     std::array<std::map<Key, VkPipeline>, 4> parts;
     PipelineLibraryCounters counters;
+    std::set<std::pair<VkFormat, VkFormat>> depthFormats;
 };
 
 struct LibraryStore {
@@ -185,7 +187,8 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
     std::vector<VkPipeline> libraries;
     for (std::size_t part = 0; part < flags.size(); ++part) {
         if (part == 0 && mesh) continue;
-        const auto key = Combined(*partKeys[part], *contextKeys[part]);
+        auto key = Combined(*partKeys[part], *contextKeys[part]);
+        key.push_back(static_cast<std::byte>(optimize));
         auto& cache = device.parts[part];
         if (const auto found = cache.find(key); found != cache.end()) {
             libraries.push_back(found->second);
@@ -195,7 +198,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VkGraphicsPipelineLibraryCreateInfoEXT library{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, flags[part] == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT ? &rendering : &shaderRendering};
         library.flags = flags[part];
         VkGraphicsPipelineCreateInfo create{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &library};
-        create.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+        create.flags = optimize ? VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
         create.pDynamicState = info.pDynamicState;
         create.layout = partLayouts[part];
         switch (flags[part]) {
@@ -251,6 +254,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             }
         }
         ++device.counters.built[part];
+        if (!partsOnly && flags[part] == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT && (rendering.depthAttachmentFormat != VK_FORMAT_UNDEFINED || rendering.stencilAttachmentFormat != VK_FORMAT_UNDEFINED)) device.depthFormats.emplace(rendering.depthAttachmentFormat, rendering.stencilAttachmentFormat);
         libraries.push_back(handle);
     }
     if (partsOnly) return VK_NULL_HANDLE;
@@ -388,6 +392,14 @@ PipelineLibraryCounters PipelineLibraryCountersOf(VkDevice device) {
     std::lock_guard lock(store.mutex);
     const auto found = store.devices.find(device);
     return found == store.devices.end() ? PipelineLibraryCounters{} : found->second.counters;
+}
+
+std::vector<std::pair<VkFormat, VkFormat>> PipelineLibraryDepthFormats(VkDevice device) {
+    auto& store = Libraries();
+    std::lock_guard lock(store.mutex);
+    const auto found = store.devices.find(device);
+    if (found == store.devices.end()) return {};
+    return {found->second.depthFormats.begin(), found->second.depthFormats.end()};
 }
 
 }

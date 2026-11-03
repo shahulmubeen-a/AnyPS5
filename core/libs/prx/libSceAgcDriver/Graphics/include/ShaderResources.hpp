@@ -73,6 +73,7 @@ struct TextureCacheBudgets {
     std::uint64_t overflow = 0;
 };
 TextureCacheBudgets TextureCacheBudgetsFor(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, const TextureMemoryUse& use, std::uint64_t previousTarget = 0);
+std::uint64_t StorageTextureCeiling(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported);
 std::uint64_t StorageTextureBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, std::uint64_t sampledBytes, std::uint64_t storageBytes);
 bool SampledBudgetReportDue(std::uint64_t reported, std::uint64_t budget, std::chrono::steady_clock::duration sinceReport);
 std::optional<std::uint32_t> LargestDeviceLocalHeap(const VkPhysicalDeviceMemoryProperties& memory);
@@ -239,12 +240,17 @@ public:
     // reconciles imports and refreshes mirrors, which needs the lock.
     ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots, bool deferred, std::uint64_t dispatchThreads = 0);
     void Complete();
+    // Whether an address-based stage A made without the lock is stale (the guest forgot memory or
+    // changed its allocations since): the dispatch then builds afresh under the lock.
+    bool StaleUnlockedAddress() const;
     // S1 (APS5_NO_SPLIT_DRAW_BUILD=1 off): the draw build in two stages, as for dispatches: the
     // constructor runs stage A only (no device lock; no guest bytes are read: host copies wait for
-    // stage B), CompleteDraw() stage B under GuestMemory::GpuMutex. Address-based stages are refused
-    // (their lease and mirrors need the lock): callers check UsesAddressTables first. `shaders` must
-    // outlive CompleteDraw().
-    ShaderResources(DeferredDrawBuild, const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes);
+    // stage B), CompleteDraw() stage B under GuestMemory::GpuMutex. Address-based stages need
+    // `addressTables` (C29, APS5_NO_BDA_DRAW_SPLIT=1 off): stage A then takes the cached address space
+    // without the lock (GuestBufferMemory::AcquireRegisteredCached) and adds the draw's snapshots, and
+    // throws when the space cannot be taken that way (the caller builds under the lock). `shaders`
+    // must outlive CompleteDraw().
+    ShaderResources(DeferredDrawBuild, const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {}, bool addressTables = false);
     void CompleteDraw();
     static bool StagesUseAddressTables(std::span<const CompiledShader> shaders);
     bool Completed() const { return completed; }
@@ -268,6 +274,9 @@ public:
             std::shared_ptr<Buffer> buffer;
             VkDeviceSize offset = 0;
             std::size_t bytes = 0;
+            // C67: a moved range read in place: the host import's buffer (`buffer` is null, `offset` is inside the import).
+            VkBuffer inPlace = VK_NULL_HANDLE;
+            VkBuffer Handle() const { return buffer != nullptr ? buffer->Handle() : inPlace; }
             std::span<std::byte> Bytes() const { return buffer->Bytes().subspan(static_cast<std::size_t>(offset), bytes); }
         };
         DescriptorCache* cache = nullptr;
@@ -296,11 +305,17 @@ public:
     std::optional<std::vector<MovedBuffer>> MovedDispatchBuffers(const CompiledShader& shader, Recorder* recorder, std::size_t maxBytes, MoveProof& proof) const;
     static std::size_t MaxDrawSnapshotBytes();
     static std::size_t DrawUploadLimit();
+    // The [draw-snapshots] counters of CopyDrawInput (vertex and index inputs, APS5_PROFILE_DRAW).
+    enum class DrawInputPath : std::uint8_t { TrackedHit, OwnedHit, TrackedCopy, UntrackedCopy, Count };
+    static void CountDrawInputPath(DrawInputPath path, std::size_t bytes, std::uint8_t ownedMiss, bool owned, bool armed);
     void WriteBack();
     // Deferred completion: MarkGpuWrites registers the results the recorded work leaves on the GPU
     // (storage images stay there; buffer ranges are noted so CPU reads wait); WriteBackBuffers runs
     // once the work completed.
     void MarkGpuWrites(Recorder& recorder);
+    // APS5_PROFILE_RESIDENT_CENSUS: notes the guest memory this use reaches (MarkGpuWrites and
+    // MarkGpuWritesInRun call it once per use).
+    void NoteResidentCensus() const;
     // As MarkGpuWrites for a dispatch that left its trailing barrier deferred (Recorder::
     // DeferDispatchBarrier): its staged copy-backs (and the direct-write marks they complete) are
     // recorded after the run's deferred barrier (Recorder::AfterRun); `self` keeps the object.
@@ -432,6 +447,7 @@ public:
     }
     // Whether RefreshData would record anything for `shader` (the per-word compare; verification).
     bool DataWordsDiffer(const CompiledShader& shader) const;
+    std::size_t BindingCount() const { return bindings.size(); }
     // Why the fast proof of a Revalidate left the object to the full walk (the [rescache]
     // revalidate line's reasons); Count: it did not.
     enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Depth, Committed, Replaced, Audit, Count };
@@ -613,7 +629,7 @@ private:
     void applyAnisoOverride();
     void forgetDeferredInputs();
     void release() noexcept;
-    void prepareAddressBindings(std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots);
+    void prepareAddressBindings(std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, bool unlocked = false);
     VkDescriptorBufferInfo descriptor(Allocation& allocation);
     void noteReusable();
     bool proveBuild(std::span<const CompiledShader> shaders, ProofReport* report);
@@ -815,6 +831,11 @@ private:
     std::span<const GuestMemorySnapshot> deferredSnapshots;
     // The deferred build is address-based: everything runs in Complete().
     bool lockedBuild = false;
+    // A deferred dispatch build whose address-based stage A took the cached space without the lock
+    // (APS5_NO_BDA_DISPATCH_SPLIT=1 off), and the guest's forget serial and registry generation then.
+    bool unlockedAddress = false;
+    std::uint64_t addressStageForget = 0;
+    std::uint64_t addressStageGeneration = 0;
     // Stage A runs without the device lock (a deferred, non-address-based build).
     bool unlockedPrepare = false;
     bool deferredDraw = false;

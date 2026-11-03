@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/src/Driver/NewPath/NewPath.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderMemoryCensus.hpp"
@@ -18,6 +19,7 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include <algorithm>
 #include <chrono>
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -207,8 +209,8 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
         }
         case 0x3c: case 0x93: {
             if (packet.size() < 5) return false;
-            const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
             const auto bytes = Pm4::WaitAwaitedBytes(packet);
+            const std::uint64_t awaited = (packet[2] & (bytes == 8 ? ~7u : ~3u)) | (static_cast<std::uint64_t>(packet[3]) << 32u);
             if (DrawPipeline::Queue0().Overlaps(awaited, bytes)) return false;
             GuestMemory::CheckRange(reinterpret_cast<const void*>(awaited), bytes, bytes);
             return Pm4::WaitSatisfiedUnchecked(packet);
@@ -609,6 +611,7 @@ void Driver::execute(const Submission& submission) {
                 GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
                 std::lock_guard gpuLock(GuestMemory::GpuMutex());
                 const auto localDevice = device.Load();
+                if (localDevice != nullptr) static_cast<void>(Graphics::StorageTexture::StoreDrawnLinear("flip"));
 
                 if (!recordLabelsForPacket(localDevice.get(), submission.queue) && localDevice != nullptr) localDevice->SubmitRecorded(submission.queue == 0);
                 if (localDevice != nullptr) {
@@ -666,6 +669,7 @@ void Driver::execute(const Submission& submission) {
             if (ringOverlap) ringOrder.afterDispatch = true;
             timed(&WorkerProfile::dispatchMs, [&] {
                 try {
+                    if (NewPath::Enabled()) static_cast<void>(NewPath::RouteCommand(opcode == 0x15 ? NewPath::CommandKind::Dispatch : NewPath::CommandKind::DispatchIndirect, device.Load().get()));
                     if (opcode == 0x15) dispatch(queue, packet, submission);
                     else dispatchIndirect(queue, packet, submission);
                 } catch (const ShaderRefusal& refusal) {
@@ -714,7 +718,8 @@ void Driver::execute(const Submission& submission) {
 
                 try {
                     std::string rejected;
-                    const auto verdict = draw(queue, packet, submission, rejected);
+                    if (NewPath::Enabled()) static_cast<void>(NewPath::RouteCommand(NewPath::CommandKind::Draw, device.Load().get()));
+                    const auto verdict = draw(queue, packet, submission, cursor, rejected);
                     drawn = verdict == DrawVerdict::Drawn;
                     CaptureTrace::Log("draw submission=%llu queue=%x offset=%zu target=%llx mask=%x verdict=%d reason=%.256s", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(color), readRegister(queue.context, 0x8e), static_cast<int>(verdict), rejected.c_str());
                     if (verdict == DrawVerdict::Rejected) {

@@ -10,11 +10,14 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace AgcDriver {
@@ -35,10 +38,10 @@ public:
     void ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType);
     void RegisterVideoOutput(std::uint32_t handle);
     void UnregisterVideoOutput(std::uint32_t handle);
-    void Submit(const Packet& packet, std::uint32_t queue);
-    void Flip(const FlipInfo& info);
+    void Submit(const Packet& packet, std::uint32_t queue, const std::function<void()>& accept);
+    void Flip(const FlipInfo& info, const std::function<void()>& accept);
     void ReserveEopFlip(const FlipInfo& info, std::uint32_t token);
-    void Suspend();
+    void Suspend(const std::function<void()>& accept);
     void PresentBuffer(const DisplayBuffer& buffer);
     void FrameBoundary();
 
@@ -61,17 +64,38 @@ private:
         std::uint64_t since = 0;
     };
 
+    struct PrologueShader {
+        std::uint64_t header = 0;
+        std::uint64_t headerHash = 0;
+        std::uint64_t code = 0;
+        std::uint64_t codeBytes = 0;
+        std::uint64_t codeHash = 0;
+    };
+
+    struct PrologueCall {
+        FrameCall call;
+        std::vector<PrologueShader> shaders;
+    };
+
     FrameCall make(FrameCallKind kind);
-    void record(FrameCall call, bool prologueCall, std::span<const Shader* const> shaders = {});
+    void record(FrameCall call, bool prologueCall, std::span<const Shader* const> shaders = {}, const std::function<void()>& accept = {});
+    void recordLocked(FrameCall call, bool prologueCall, std::span<const Shader* const> shaders);
     void emitDelta();
     void emitShaderDelta(std::span<const Shader* const> shaders);
-    void writeDelta(std::span<const Span> spans, std::span<const std::uint64_t> hostPages, std::span<const Range> added = {});
+    void writeDelta(std::span<const Span> spans, std::span<const std::uint64_t> hostPages, std::span<const Range> added = {}, std::span<const std::pair<std::uint64_t, std::vector<std::byte>>> images = {});
     bool triggered();
     void start();
     void finish();
     void snapshot(const Range& range);
     void writeReferenceFrames();
+    void writeFrameReference();
+    void writeCheckpoint();
+    std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> changedSectionPages();
+    std::vector<PrologueShader> prologueShaders(std::span<const Shader* const> shaders, bool registration);
+    void writePrologue();
+    void writeAliasedPages();
     bool abandonIfDiskLow();
+    void stop(const char* reason);
     std::string header() const;
     std::vector<Range> committedRanges();
     std::vector<Range> newRanges();
@@ -83,19 +107,41 @@ private:
     std::mutex mutex;
     State state = State::Waiting;
     std::unique_ptr<FrameCaptureWriter> writer;
-    std::vector<FrameCall> prologue;
+    std::vector<PrologueCall> prologue;
+    std::map<std::uint64_t, std::vector<std::byte>> headerImages;
+    std::uint64_t prologueRewrites = 0;
+    std::uint64_t prologueRewriteBytes = 0;
+    std::uint64_t prologueDropped = 0;
+    std::uint64_t prologueCallCount = 0;
+    std::uint64_t gdsAddress = 0;
+    std::uint64_t aliasedPages = 0;
+    std::uint64_t aliasGroups = 0;
     std::deque<FrameCall> reservations;
     std::vector<Range> ranges;
     std::map<std::uint64_t, std::uint64_t> shaderMarks;
     std::map<std::uint64_t, std::uint64_t> hostPageHashes;
+    std::unordered_map<std::uint64_t, std::uint64_t> sectionPageHashes;
+    std::map<std::uint64_t, std::uint64_t> shaderImageHashes;
     std::mutex displayMutex;
     std::map<std::uint64_t, DisplayBuffer> displayBuffers;
+    std::optional<DisplayBuffer> lastPresented;
+    std::uint64_t presents = 0;
+    std::uint64_t referenceIndex = 0;
+    std::uint64_t checkpointFrame = 0;
+    std::uint64_t checkpointSubmit = 0;
+    std::uint64_t frameSubmits = 0;
+    bool checkpointTaken = false;
+    std::uint64_t checkpointBlocks = 0;
+    std::uint64_t checkpointBytes = 0;
+    std::map<std::uint64_t, std::uint64_t> blockHashes;
     std::uint64_t ordinal = 0;
     std::uint64_t boundaries = 0;
     std::uint64_t startBoundary = 0;
     std::uint64_t recordedFrames = 0;
     std::uint64_t generation = 0;
     std::uint64_t deltaGroups = 0;
+    std::uint64_t blockedDeltas = 0;
+    std::uint64_t rereadDeltas = 0;
     std::uint64_t deltaBytes = 0;
     std::uint64_t snapshotBytes = 0;
     std::uint64_t recordedCalls = 0;

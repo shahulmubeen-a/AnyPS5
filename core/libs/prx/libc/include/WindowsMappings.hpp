@@ -13,6 +13,9 @@
 #include <cstring>
 #include <mutex>
 #include <map>
+#include <optional>
+#include <set>
+#include <unordered_map>
 #include <memory>
 #include <vector>
 #include <stdexcept>
@@ -21,6 +24,33 @@
 #include <utility>
 
 namespace GuestArena {
+
+class MappingMutex {
+public:
+    void lock() {
+        inner.lock();
+        owner.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    }
+    bool try_lock() {
+        if (!inner.try_lock()) return false;
+        owner.store(GetCurrentThreadId(), std::memory_order_relaxed);
+        return true;
+    }
+    void unlock() {
+        owner.store(0, std::memory_order_relaxed);
+        inner.unlock();
+    }
+    bool HeldByCurrentThread() const {
+        return owner.load(std::memory_order_relaxed) == GetCurrentThreadId();
+    }
+    DWORD Owner() const {
+        return owner.load(std::memory_order_relaxed);
+    }
+
+private:
+    std::mutex inner;
+    std::atomic<DWORD> owner{0};
+};
 
 class WindowsMappings {
 public:
@@ -46,6 +76,7 @@ public:
         std::vector<std::pair<std::uintptr_t, std::size_t>> created;
         std::lock_guard lock(mutex);
         collectableRanges.clear();
+        disownRange(reinterpret_cast<std::uintptr_t>(address), reinterpret_cast<std::uintptr_t>(address) + bytes);
         const DWORD flags = MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER | (watched ? MEM_WRITE_WATCH : 0);
         const auto cut = [](std::uintptr_t at, std::size_t size, const char* operation) {
             if (!VirtualFree(reinterpret_cast<void*>(at), size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail(operation);
@@ -126,6 +157,7 @@ public:
             auto shared = slot.page.lock();
             if (!shared) {
                 shared = std::make_shared<SharedPage>();
+                shared->comparedWhenShared = slot.comparedWhenShared;
                 slot.page = shared;
             }
             return shared;
@@ -135,6 +167,8 @@ public:
             const auto shared = slot.page.lock();
             return resident && !slot.stored && (!shared || shared->aliases.empty());
         };
+        const bool perPage = !resident && sectionBytes == SIZE_MAX;
+        if (perPage) commitSection(section, offset, bytes);
         for (std::size_t done = 0; done < bytes;) {
             const auto base = cursor + done;
             if (single(done)) {
@@ -164,27 +198,81 @@ public:
                 done += runBytes;
                 continue;
             }
-            const auto slot = slotOf(done);
-            const auto shared = pageOf(*slot);
-            const auto aliases = shared->aliases;
-            for (const auto alias : aliases) {
-                if (views.at(alias).resident) demote(alias);
+            if (sectionBytes != SIZE_MAX) {
+                const auto slot = slotOf(done);
+                const auto shared = pageOf(*slot);
+                const auto aliases = shared->aliases;
+                for (const auto alias : aliases) {
+                    if (views.at(alias).resident) demote(alias);
+                    views.at(alias).aliasDemoted = false;
+                }
+                const auto viewBytes = std::min(pageBytes, sectionBytes - done);
+                split(base, pageBytes);
+                mapShared(base, section, offset + done, protection, viewProtection, viewBytes);
+                slot->stored = true;
+                shared->aliases.push_back(base);
+                const auto created = views.emplace(base, View{shared, protection, {}, 0, owned, offset + done, 0, 0, false, slot, hostPages(viewBytes)}).first;
+                if (shared->comparedWhenShared) created->second.unreported = allSubpages;
+                remember(freshRanges, base, base + pageBytes);
+                invalidate(*shared);
+                done += pageBytes;
+                continue;
             }
-            const auto viewBytes = std::min(pageBytes, sectionBytes - done);
-            split(base, pageBytes);
-            mapShared(base, section, offset + done, protection, viewProtection, viewBytes);
-            slot->stored = true;
-            shared->aliases.push_back(base);
-            views.emplace(base, View{shared, protection, {}, 0, owned, offset + done, 0, 0, false, slot, hostPages(viewBytes)});
-            remember(freshRanges, base, base + pageBytes);
-            invalidate(*shared);
-            done += pageBytes;
+            std::vector<std::pair<std::shared_ptr<Physical>, std::shared_ptr<SharedPage>>> pages;
+            pages.reserve((bytes - done) / pageBytes);
+            auto runBytes = std::size_t{0};
+            do {
+                const auto slot = slotOf(done + runBytes);
+                const auto shared = pageOf(*slot);
+                const auto aliases = shared->aliases;
+                for (const auto alias : aliases) {
+                    if (views.at(alias).resident) demote(alias);
+                    views.at(alias).aliasDemoted = false;
+                }
+                pages.emplace_back(slot, shared);
+                runBytes += pageBytes;
+            } while (done + runBytes < bytes && !single(done + runBytes));
+            if (!perPage) commitSection(section, offset + done, runBytes);
+            split(base, runBytes);
+            mapRun(base, runBytes, section, offset + done);
+            DWORD previous;
+            if (!VirtualProtect(reinterpret_cast<void*>(base), runBytes, protection, &previous)) fail("protect shared guest pages");
+            collectableRanges.clear();
+            for (std::size_t at = 0; at < runBytes; at += pageBytes) {
+                auto& [slot, shared] = pages[at / pageBytes];
+                slot->stored = true;
+                shared->aliases.push_back(base + at);
+                invalidate(*shared);
+                const auto created = views.emplace(base + at, View{std::move(shared), protection, {}, 0, owned, offset + done + at, 0, 0, false, std::move(slot)}).first;
+                if (created->second.page->comparedWhenShared) created->second.unreported = allSubpages;
+            }
+            remember(freshRanges, base, base + runBytes);
+            done += runBytes;
         }
     }
 
+    std::size_t AliasedPages(std::uintptr_t* pages, std::uintptr_t* identities, std::size_t capacity, std::size_t* bytes) {
+        std::lock_guard lock(mutex);
+        if (bytes != nullptr) *bytes = pageBytes;
+        std::size_t count = 0;
+        for (const auto& [base, view] : views) {
+            if (view.page->aliases.size() < 2) continue;
+            if (count < capacity) {
+                pages[count] = base;
+                identities[count] = reinterpret_cast<std::uintptr_t>(view.page.get());
+            }
+            ++count;
+        }
+        return count;
+    }
+
+    // Begins a guest protection change of the range (the caller's VirtualProtect follows): owned blocks
+    // are disarmed and none is armed until EndSetProtection.
     void SetProtection(std::uintptr_t address, std::size_t bytes, DWORD protection) {
         std::lock_guard lock(mutex);
         collectableRanges.clear();
+        ++protectionsInFlight;
+        disownRange(address, address + bytes);
         for (auto it = views.lower_bound(address); it != views.end() && it->first < address + bytes; ++it) {
             it->second.protection = protection;
             it->second.armed = 0;
@@ -194,6 +282,8 @@ public:
 
     void Pin(std::uintptr_t address, std::size_t bytes) {
         std::lock_guard lock(mutex);
+        disownRange(address, address + bytes);
+        pinnedRanges.emplace(address, address + bytes);
         for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < address + bytes; ++it) {
             auto& page = *it->second.page;
             ++page.pins;
@@ -209,6 +299,7 @@ public:
 
     void Unpin(std::uintptr_t address, std::size_t bytes) {
         std::lock_guard lock(mutex);
+        eraseRange(pinnedRanges, address, address + bytes);
         for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < address + bytes; ++it) {
             auto& page = *it->second.page;
             if (page.pins != 0) --page.pins;
@@ -216,21 +307,170 @@ public:
         }
     }
 
-    bool HandleWrite(std::uintptr_t address) {
+    void CompareWhenShared(std::uintptr_t address, std::size_t bytes, bool residentOnly = false) {
         std::lock_guard lock(mutex);
+        collectableRanges.clear();
+        for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < address + bytes; ++it) {
+            if (residentOnly && !it->second.resident && !it->second.aliasDemoted) continue;
+            auto& page = *it->second.page;
+            const bool marked = page.comparedWhenShared;
+            page.comparedWhenShared = true;
+            it->second.slot->comparedWhenShared = true;
+            for (const auto alias : page.aliases) {
+                auto& view = views.at(alias);
+                if (view.resident) continue;
+                if (!marked) view.unreported = allSubpages;
+                if (view.armed == 0) continue;
+                protectSubpages(alias, view.armed, view.protection, "stop arming a compared shared page", view.viewBytes);
+                view.armed = 0;
+            }
+        }
+    }
+
+    void ComparedPages(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool unreported) {
+        std::lock_guard lock(mutex);
+        const auto capacity = *count;
+        *count = 0;
+        const auto end = address + bytes;
+        for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < end; ++it) {
+            auto& view = it->second;
+            if (view.resident || !view.page->comparedWhenShared) continue;
+            const auto listed = static_cast<std::uint8_t>(subpagesOf(it->first, address, end) & (unreported ? view.unreported : allSubpages));
+            for (std::size_t sub = 0; sub < subpages; ++sub) {
+                const auto bit = static_cast<std::uint8_t>(1u << sub);
+                if ((listed & bit) == 0) continue;
+                if (*count == capacity) return;
+                pages[(*count)++] = reinterpret_cast<void*>(it->first + sub * subpageBytes);
+                if (unreported) view.unreported &= static_cast<std::uint8_t>(~bit);
+            }
+        }
+    }
+
+    enum class AccessGuardRefusal : std::uint8_t { None, Misaligned, AliasedView, Pinned, HostAccess, Resident, NotAccessible, Failed, InFlight, Executable };
+
+    AccessGuardRefusal GuardAccess(std::uintptr_t address, std::size_t bytes) {
+        if (address % subpageBytes != 0 || bytes % subpageBytes != 0 || bytes == 0) return AccessGuardRefusal::Misaligned;
+        guardsUsed.store(true, std::memory_order_seq_cst);
+        std::lock_guard lock(mutex);
+        const auto end = address + bytes;
+        if (protectionsInFlight != 0 || changesActive.load(std::memory_order_seq_cst) != 0) return AccessGuardRefusal::InFlight;
+        if (views.lower_bound(address & ~(pageBytes - 1)) != views.end() && views.lower_bound(address & ~(pageBytes - 1))->first < end) return AccessGuardRefusal::AliasedView;
+        if (overlapsRange(pinnedRanges, address, end)) return AccessGuardRefusal::Pinned;
+        if (overlapsRange(hostAccess, address, end)) return AccessGuardRefusal::HostAccess;
+        auto run = residentRuns.upper_bound(address);
+        if (run != residentRuns.begin() && std::prev(run)->second.end > address) --run;
+        if (run != residentRuns.end() && run->first < end) return AccessGuardRefusal::Resident;
+        std::vector<std::pair<std::uintptr_t, DWORD>> arming;
+        for (auto subpage = address; subpage < end; subpage += subpageBytes) {
+            if (accessGuards.contains(subpage)) continue;
+            const auto memory = query(subpage);
+            if (memory.State != MEM_COMMIT || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return AccessGuardRefusal::NotAccessible;
+            if ((memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0) return AccessGuardRefusal::Executable;
+            arming.emplace_back(subpage, memory.Protect);
+        }
+        for (std::size_t k = 0; k < arming.size(); ++k) {
+            accessGuards.emplace(arming[k].first, AccessGuard{arming[k].second, ++guardArms});
+            guardedSubpages.fetch_add(1, std::memory_order_release);
+            DWORD previous = 0;
+            if (VirtualProtect(reinterpret_cast<void*>(arming[k].first), subpageBytes, PAGE_NOACCESS, &previous)) continue;
+            for (std::size_t undo = 0; undo <= k; ++undo) {
+                if (undo < k) VirtualProtect(reinterpret_cast<void*>(arming[undo].first), subpageBytes, arming[undo].second, &previous);
+                accessGuards.erase(arming[undo].first);
+                guardedSubpages.fetch_sub(1, std::memory_order_release);
+            }
+            return AccessGuardRefusal::Failed;
+        }
+        return AccessGuardRefusal::None;
+    }
+
+    void UnguardAccess(std::uintptr_t address, std::size_t bytes) {
+        if (guardedSubpages.load(std::memory_order_acquire) == 0) return;
+        std::lock_guard lock(mutex);
+        dropAccessGuards(address, address + bytes);
+    }
+
+    void DropAccessGuards(std::uintptr_t address, std::size_t bytes) {
+        UnguardAccess(address, bytes);
+    }
+
+    bool AccessGuarded(std::uintptr_t address) {
+        if (guardedSubpages.load(std::memory_order_acquire) == 0 || mutex.HeldByCurrentThread()) return false;
+        std::lock_guard lock(mutex);
+        return accessGuards.contains(address & ~std::uintptr_t{subpageBytes - 1});
+    }
+
+    std::uintptr_t FirstAccessGuarded(std::uintptr_t address, std::size_t bytes) {
+        if (guardedSubpages.load(std::memory_order_acquire) == 0 || bytes == 0) return 0;
+        std::lock_guard lock(mutex);
+        const auto found = accessGuards.lower_bound(address & ~std::uintptr_t{subpageBytes - 1});
+        return found != accessGuards.end() && found->first < address + bytes ? std::max(found->first, address) : 0;
+    }
+
+    std::size_t AccessGuardedSubpages() const {
+        return guardedSubpages.load(std::memory_order_acquire);
+    }
+
+    void SetAccessGuardObserver(void (*callback)(std::uintptr_t address)) {
+        accessGuardObserver.store(callback, std::memory_order_release);
+    }
+
+    bool AccessGuardsUsed() const {
+        return guardsUsed.load(std::memory_order_seq_cst);
+    }
+
+    void ChangeBegin() {
+        changesActive.fetch_add(1, std::memory_order_seq_cst);
+    }
+
+    void ChangeEnd() {
+        changesActive.fetch_sub(1, std::memory_order_seq_cst);
+    }
+
+    void BeginMappingChange() {
+        std::lock_guard lock(mutex);
+        ++protectionsInFlight;
+    }
+
+    void EndMappingChange() {
+        std::lock_guard lock(mutex);
+        if (protectionsInFlight != 0) --protectionsInFlight;
+    }
+
+    bool OpenAccessGuards(std::uintptr_t address, std::size_t bytes) {
+        while (const auto guarded = FirstAccessGuarded(address, bytes)) {
+            const auto observer = accessGuardObserver.load(std::memory_order_acquire);
+            if (observer == nullptr) return false;
+            observer(guarded);
+            if (FirstAccessGuarded(guarded, 1) != 0) return false;
+        }
+        return true;
+    }
+
+    DWORD MappingLockOwner() const {
+        return mutex.Owner();
+    }
+
+    void RunUnderLock(void (*body)(void*), void* argument) {
+        std::lock_guard lock(mutex);
+        body(argument);
+    }
+
+    bool HandleWrite(std::uintptr_t address) {
+        if (mutex.HeldByCurrentThread()) return false;
+        if (guardsUsed.load(std::memory_order_acquire)) {
+            if (const auto served = handleAccessGuard(address, true)) return *served;
+        }
+        std::lock_guard lock(mutex);
+        if (ownedLive != 0 && address < ownedAddressLimit && (ownedWord(address & ~std::uintptr_t{ownedBlockBytes - 1}) & 1u) != 0) ownedFaults.fetch_add(1, std::memory_order_relaxed);
         const auto base = address & ~(pageBytes - 1);
         const auto found = views.find(base);
         if (found == views.end() || !writable(found->second.protection)) return false;
         auto& view = found->second;
-        const auto written = subpagesOf(base, address, address + 1);
-        if (view.resident && (view.armed & written) == 0) {
+        if (view.resident) {
             const auto memory = query(address);
             return memory.State == MEM_COMMIT && writable(memory.Protect & 0xffu);
         }
-        if (view.resident) {
-            resumeResidentWrites(base);
-            return true;
-        }
+        const auto written = subpagesOf(base, address, address + 1);
         invalidate(*view.page, written);
         protectSubpages(base, written, view.protection, "resume shared memory write", view.viewBytes);
         view.armed &= static_cast<std::uint8_t>(~written);
@@ -238,6 +478,10 @@ public:
     }
 
     bool HandleRead(std::uintptr_t address) {
+        if (mutex.HeldByCurrentThread()) return false;
+        if (guardsUsed.load(std::memory_order_acquire)) {
+            if (const auto served = handleAccessGuard(address, false)) return *served;
+        }
         std::lock_guard lock(mutex);
         if (!views.contains(address & ~(pageBytes - 1))) return false;
         const auto memory = query(address);
@@ -271,6 +515,8 @@ public:
         for (auto it = first; it != views.end() && it->first < end; ++it) {
             if (!writable(it->second.protection)) return false;
         }
+        disownRange(address, end);
+        hostAccess.emplace(address, end);
         for (auto it = first; it != views.end() && it->first < end; ++it) {
             auto& view = it->second;
             if (store) ++view.hostWrites;
@@ -289,6 +535,7 @@ public:
     void EndHostWrite(std::uintptr_t address, std::size_t bytes, bool store = true) {
         std::lock_guard lock(mutex);
         const auto end = address + bytes;
+        eraseRange(hostAccess, address, end);
         for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < end; ++it) {
             if (store) --it->second.hostWrites;
             else --it->second.hostImports;
@@ -320,7 +567,7 @@ public:
         }
         for (std::size_t done = 0; done < bytes; done += pageBytes) {
             const auto found = views.find(address + done);
-            if (found != views.end() && found->second.resident) demote(address + done);
+            if (found != views.end() && found->second.resident) demote(address + done, true);
         }
         auto view = views.find(address);
         if (view == views.end()) throw refuse("the range does not start at a shared view");
@@ -365,10 +612,184 @@ public:
 
     bool Protection(std::uintptr_t address, std::uint32_t* protection) {
         std::lock_guard lock(mutex);
+        if (guardedSubpages.load(std::memory_order_acquire) != 0) {
+            if (const auto guarded = accessGuards.find(address & ~std::uintptr_t{subpageBytes - 1}); guarded != accessGuards.end() && !views.contains(address & ~(pageBytes - 1))) {
+                *protection = guarded->second.protection;
+                return true;
+            }
+        }
         const auto found = views.find(address & ~(pageBytes - 1));
         if (found == views.end()) return false;
         *protection = found->second.protection;
         return true;
+    }
+
+    // Owned blocks (the driver's owned proofs, APS5_NO_OWNED_PROOFS): 64 KiB blocks of guest memory
+    // whose every CPU change is seen without a fault. Each block has a word: bit 0 is set while the
+    // block is armed, the rest counts the times it was disarmed. Nothing is write-protected: a CPU
+    // store sets the page's write-watch bit (the pages are MEM_WRITE_WATCH memory, checked when
+    // armed), and OwnedUnchanged asks GetWriteWatch, without resetting, whether a page of the range
+    // was written (the first read of a never-touched page sets its bit too, a demand-zero fault: a
+    // conservative answer once per page). A bit is only cleared by a reset, and every reset of guest memory is Collect's or
+    // ArmOwned's, under the mutex: a reset that takes a written page of an armed block moves its word
+    // (watchTaken, and a Fresh collection's reset of settled pages). Arming
+    // resets the block's bits itself so that writes before it do not count against the proof, but keeps the pages it took (ownedPending), and Collect reports them
+    // as written until a clearing collect takes them, so the write tracker sees every store it would
+    // have seen without the arming. Every operation here that changes the block's mapping or
+    // protection or opens it to a host call (Commit, Reset, Map, SetProtection, Pin, BeginHostWrite
+    // and import, a resident run's demotion or eviction) moves the word first:
+    // a recommitted page reads zeros without a write bit. So while OwnedUnchanged holds for the words
+    // ArmOwned returned, no CPU store reached the range after ArmOwned. GPU writes through a host
+    // import bypass the page tables and are not seen here.
+    // A block's pages may be resident direct memory with a single guest view, private commits (the
+    // guest's flexible and memory-pool memory, with OwnedPrivate), read-write or read-only, and
+    // reserved placeholders. Refused, arming nothing (OwnedRefusal, counted): shared or aliased views
+    // (tracked by protection, not write watch), pinned pages and imports being made, open host
+    // writes, inaccessible, guarded or write-copy pages or other mapping types, any block while a
+    // guest protection change is in flight, and pages that are not write-watched (Unwatched).
+    static constexpr std::size_t ownedBlockBytes = 0x10000;
+    static constexpr unsigned OwnedPrivate = 1;
+
+    enum class OwnedRefusal : std::uint8_t { None, Outside, Shared, Pinned, HostWrite, InFlight, NotWritable, Private, Empty, Unwatched, Count };
+    static constexpr std::size_t OwnedRefusalCount = static_cast<std::size_t>(OwnedRefusal::Count);
+
+    // faults: guest write faults inside armed owned blocks. Owned blocks never change a protection,
+    // so each one is another mechanism's (shared views, a genuine access violation) and none is resolved
+    // for them. collected: disarms by a written page (a reset that took it, or a re-arm that found
+    // it); taken: pages whose write bits an arming took (reported later as written); queries:
+    // GetWriteWatch calls of OwnedUnchanged; dirty: OwnedUnchanged answers that found a written page;
+    // locked: OwnedUnchanged answers asked again under the lock (a reset ran across the first);
+    // epochHeld: answers with a mark taken from the blocks' checks alone (no query); epochQueried:
+    // answers with a mark that had to query (a block not checked since the mark).
+    struct OwnedCounts {
+        std::uint64_t arms = 0;
+        std::uint64_t armedBlocks = 0;
+        std::uint64_t refused = 0;
+        std::uint64_t faults = 0;
+        std::uint64_t disowned = 0;
+        std::uint64_t privateBlocks = 0;
+        std::uint64_t unmappedBlocks = 0;
+        std::uint64_t partialBlocks = 0;
+        std::uint64_t collected = 0;
+        std::uint64_t taken = 0;
+        std::uint64_t queries = 0;
+        std::uint64_t dirty = 0;
+        std::uint64_t locked = 0;
+        std::uint64_t epochHeld = 0;
+        std::uint64_t epochQueried = 0;
+        std::array<std::uint64_t, OwnedRefusalCount> reasons{};
+    };
+
+    // Arms every 64 KiB block overlapping [address, address + bytes) (count must be their number) and
+    // stores each block's armed word, or arms none and returns false when one cannot be armed. Blocks
+    // already armed keep their word unless a page of theirs was written since (then the word moves
+    // and the block is armed afresh).
+    bool ArmOwned(std::uintptr_t address, std::size_t bytes, std::uint64_t* words, std::size_t count, unsigned flags = 0) {
+        if (bytes == 0 || bytes > ownedAddressLimit || address > ownedAddressLimit - bytes) return false;
+        const auto first = address & ~std::uintptr_t{ownedBlockBytes - 1};
+        const auto stop = (address + bytes + ownedBlockBytes - 1) & ~std::uintptr_t{ownedBlockBytes - 1};
+        if ((stop - first) / ownedBlockBytes != count) return false;
+        std::lock_guard lock(mutex);
+        if (protectionsInFlight != 0) return NoteOwnedRefusal(OwnedRefusal::InFlight);
+        std::vector<std::pair<std::uintptr_t, OwnedPlan>> plans;
+        std::vector<OwnedRun> runs;
+        for (auto block = first; block < stop; block += ownedBlockBytes) {
+            if ((ownedWord(block) & 1u) != 0) {
+                if (!blockWritten(block)) continue;
+                disownBlock(block, ownedCollected);
+            }
+            OwnedPlan plan;
+            if (const auto refusal = ownable(block, (flags & OwnedPrivate) != 0, plan); refusal != OwnedRefusal::None) return NoteOwnedRefusal(refusal);
+            appendRuns(runs, block, plan.layout, block, block + ownedBlockBytes);
+            plans.emplace_back(block, plan);
+        }
+        for (const auto& run : runs) {
+            if (!queryWatch(run.begin, run.end).has_value()) return NoteOwnedRefusal(OwnedRefusal::Unwatched);
+        }
+        for (const auto& run : runs) takeWrites(run.begin, run.end);
+        for (const auto& [block, plan] : plans) {
+            auto& slot = ownedSlot(block);
+            slot.store(slot.load(std::memory_order_relaxed) + 1, std::memory_order_seq_cst);
+            {
+                std::lock_guard layouts(ownedMutex);
+                ownedLayouts[block] = plan.layout;
+            }
+            ++ownedLive;
+            ownedArmedBlocks.fetch_add(1, std::memory_order_relaxed);
+            if (plan.privatePages) ownedPrivateBlocks.fetch_add(1, std::memory_order_relaxed);
+            if (!plan.mapped) ownedUnmappedBlocks.fetch_add(1, std::memory_order_relaxed);
+            else if (plan.unmapped) ownedPartialBlocks.fetch_add(1, std::memory_order_relaxed);
+        }
+        std::size_t index = 0;
+        for (auto block = first; block < stop; block += ownedBlockBytes, ++index) words[index] = ownedWord(block);
+        ownedArms.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool NoteOwnedRefusal(OwnedRefusal refusal) {
+        ownedRefused.fetch_add(1, std::memory_order_relaxed);
+        ownedReasons[static_cast<std::size_t>(refusal)].fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Whether every block of the range is still armed with the word ArmOwned stored for it and no
+    // mapped page of [address, address + bytes) was written since: one GetWriteWatch without reset
+    // per run of pages in one allocation (a call cannot span two). Without the mapping lock: the
+    // words are read before and after the queries, and ownedResets (odd while a reset and the word
+    // moves it implies are under way) must be even and unchanged across them, so no reset that took
+    // a bit of the range falls between a query and the words; otherwise it is asked again under the
+    // lock.
+    //
+    // `mark` (OwnedMark, the caller's last ordering point; 0: none) lets the answer come from the
+    // blocks' checks: a block is checked at c when a query that began after a read of the clock
+    // (ownedClock) returning c found none of the block's armed pages written and its word still the
+    // one it was asked with. With every block checked at c >= mark and its word unchanged, the answer
+    // holds without a query: the clock only moves by read-modify-writes, so a read returning
+    // c >= mark reads from the mark's increment or a later one (its release sequence) and every CPU
+    // store that happened before the mark had set its page's bit before that query, which then saw
+    // it (no check) or found the word moved by the reset that took it (a reset moves the words inside
+    // the reset window). A store after the mark may stay unseen until the caller's next mark, the
+    // collect epoch's rule: the driver marks at its ordering points (a submission, a guest-memory
+    // wait the CPU may have satisfied, a drain, a reap). Without a mark every answer queries, as
+    // before. With a mark and a block not checked since it, the blocks are queried whole and checked;
+    // a written page found in them is asked again over the range alone.
+    bool OwnedUnchanged(std::uintptr_t address, std::size_t bytes, const std::uint64_t* words, std::size_t count, std::uint64_t mark = 0) {
+        if (bytes == 0 || bytes > ownedAddressLimit || address > ownedAddressLimit - bytes) return false;
+        const auto first = address & ~std::uintptr_t{ownedBlockBytes - 1};
+        const auto stop = (address + bytes + ownedBlockBytes - 1) & ~std::uintptr_t{ownedBlockBytes - 1};
+        if ((stop - first) / ownedBlockBytes != count) return false;
+        if (mark != 0) {
+            if (checkedSince(first, stop, words, mark)) {
+                ownedEpochHeld.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+            ownedEpochQueried.fetch_add(1, std::memory_order_relaxed);
+            const auto clock = ownedClock.load(std::memory_order_seq_cst);
+            if (!wordsHold(first, stop, words)) return false;
+            if (unchangedNow(first, stop - first, first, stop, words)) {
+                markChecked(first, stop, clock);
+                return true;
+            }
+        }
+        return unchangedNow(address, bytes, first, stop, words);
+    }
+
+    // A new mark: the clock after this call's increment (see OwnedUnchanged).
+    std::uint64_t OwnedMark() {
+        return ownedClock.fetch_add(1, std::memory_order_seq_cst) + 1;
+    }
+
+    OwnedCounts TakeOwnedCounts() {
+        const auto take = [](std::atomic<std::uint64_t>& value) { return value.exchange(0, std::memory_order_relaxed); };
+        OwnedCounts counts{take(ownedArms), take(ownedArmedBlocks), take(ownedRefused), take(ownedFaults), take(ownedDisowned), take(ownedPrivateBlocks), take(ownedUnmappedBlocks), take(ownedPartialBlocks), take(ownedCollected), take(ownedTaken), take(ownedQueries), take(ownedDirty), take(ownedLocked), take(ownedEpochHeld), take(ownedEpochQueried), {}};
+        for (std::size_t i = 0; i < OwnedRefusalCount; ++i) counts.reasons[i] = take(ownedReasons[i]);
+        return counts;
+    }
+
+    // Ends the guest protection change SetProtection began (the caller's own VirtualProtect landed).
+    void EndSetProtection() {
+        std::lock_guard lock(mutex);
+        if (protectionsInFlight != 0) --protectionsInFlight;
     }
 
     bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear, Collection collection = Collection::All) {
@@ -384,6 +805,7 @@ public:
                     if (!watchResident) return false;
                     continue;
                 }
+                if (it->second.page->comparedWhenShared) return false;
                 if (it->second.protection != PAGE_NOACCESS) continue;
                 for (auto at = std::max(address, it->first); at < std::min(end, it->first + pageBytes); at += 4096) {
                     if ((it->second.collected & (1u << ((at - it->first) / 4096))) == 0) return false;
@@ -510,10 +932,12 @@ public:
                 const auto stop = std::min(end, reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize);
                 if (capacity == *count) return true;
                 const auto touched = (((stop + 4095) & ~static_cast<std::uintptr_t>(4095)) - (cursor & ~static_cast<std::uintptr_t>(4095))) / 4096;
-                ULONG_PTR available = std::min<ULONG_PTR>(capacity - *count, touched);
+                const auto room = std::min<ULONG_PTR>(capacity - *count, touched);
+                ULONG_PTR available = room;
                 DWORD granularity = 0;
+                const ResetWindow window(ownedResets, clear);
                 if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(cursor), stop - cursor, pages + *count, &available, &granularity) != 0) fail("collect private guest writes");
-                *count += available;
+                *count += watchTaken(pages + *count, available, room, cursor, stop, clear);
                 if (*count == capacity) return true;
                 cursor = stop;
             }
@@ -523,6 +947,40 @@ public:
     }
 
 private:
+    std::optional<bool> handleAccessGuard(std::uintptr_t address, bool write) {
+        const auto subpage = address & ~std::uintptr_t{subpageBytes - 1};
+        std::uint64_t arm = 0;
+        {
+            std::lock_guard lock(mutex);
+            if (const auto guarded = accessGuards.find(subpage); guarded != accessGuards.end()) {
+                arm = guarded->second.arm;
+            } else {
+                const auto memory = query(address);
+                const auto protection = memory.Protect & 0xffu;
+                const bool allowed = memory.State == MEM_COMMIT && (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0 && (!write || writable(protection) || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_WRITECOPY);
+                if (allowed) return true;
+                return std::nullopt;
+            }
+        }
+        const auto observer = accessGuardObserver.load(std::memory_order_acquire);
+        if (observer == nullptr) return false;
+        observer(address);
+        std::lock_guard lock(mutex);
+        const auto guarded = accessGuards.find(subpage);
+        return guarded == accessGuards.end() || guarded->second.arm != arm;
+    }
+
+    void dropAccessGuards(std::uintptr_t address, std::uintptr_t end) {
+        auto it = accessGuards.lower_bound(address & ~std::uintptr_t{subpageBytes - 1});
+        while (it != accessGuards.end() && it->first < end) {
+            DWORD previous = 0;
+            const bool restored = VirtualProtect(reinterpret_cast<void*>(it->first), subpageBytes, it->second.protection, &previous) != 0;
+            it = accessGuards.erase(it);
+            guardedSubpages.fetch_sub(1, std::memory_order_release);
+            if (!restored) fail("drop a guest access guard");
+        }
+    }
+
     bool collectable(std::uintptr_t address, std::uintptr_t end) {
         const auto proven = collectableRanges.upper_bound(address);
         if (proven != collectableRanges.begin() && std::prev(proven)->second >= end) return true;
@@ -530,7 +988,7 @@ private:
         for (auto cursor = address; cursor < end;) {
             const auto base = cursor & ~(pageBytes - 1);
             if (const auto found = viewAt(base, position); found != views.end()) {
-                if (found->second.protection == PAGE_NOACCESS || (found->second.resident && !watchResident)) return false;
+                if (found->second.protection == PAGE_NOACCESS || (found->second.resident ? !watchResident : found->second.page->comparedWhenShared)) return false;
                 cursor = std::min(end, base + pageBytes);
                 continue;
             }
@@ -556,6 +1014,7 @@ private:
         }();
         std::vector<std::uintptr_t> aliases;
         std::uint32_t pins = 0;
+        bool comparedWhenShared = false;
     };
     struct Section {
         HANDLE handle;
@@ -606,6 +1065,7 @@ private:
     struct Physical {
         std::weak_ptr<SharedPage> page;
         bool stored = false;
+        bool comparedWhenShared = false;
         std::shared_ptr<Saved> saved;
         std::size_t savedOffset = 0;
     };
@@ -622,12 +1082,13 @@ private:
         std::shared_ptr<Physical> slot;
         std::size_t viewBytes = pageBytes;
         std::uint32_t hostImports = 0;
+        bool aliasDemoted = false;
+        std::uint8_t unreported = 0;
     };
     struct Run {
         std::uintptr_t end;
         std::array<std::uint64_t, 8> collected;
         std::uint32_t fresh;
-        bool writeObserved = false;
     };
     struct Window {
         void* view = nullptr;
@@ -641,14 +1102,15 @@ private:
 
     void collectResident(std::uintptr_t start, Run& run, std::uintptr_t from, std::uintptr_t stop, void** pages, std::size_t* count, bool clear, Collection collection) {
         const auto first = from & ~std::uintptr_t{4095};
-        const bool armed = clear && run.fresh == 0 && !run.writeObserved && collection != Collection::Fresh && run.end - start >= 0x40000 && armResident(first, stop);
         if (run.fresh == 0 && collection != Collection::Fresh) {
-            ULONG_PTR reported = (stop - first + 4095) / 4096;
+            const ULONG_PTR room = (stop - first + 4095) / 4096;
+            ULONG_PTR reported = room;
             DWORD granularity = 0;
+            const ResetWindow window(ownedResets, clear);
             if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(first), stop - first, pages + *count, &reported, &granularity) != 0) fail("collect resident guest writes");
+            reported = watchTaken(pages + *count, reported, room, first, stop, clear);
             for (ULONG_PTR index = 0; index < reported; ++index) pages[*count + index] = reinterpret_cast<void*>(std::max(from, reinterpret_cast<std::uintptr_t>(pages[*count + index])));
             *count += reported;
-            if (armed) rememberClean(from, stop);
             return;
         }
         std::vector<std::uintptr_t> written;
@@ -656,13 +1118,27 @@ private:
             std::vector<void*> found((stop - first + 4095) / 4096);
             ULONG_PTR reported = found.size();
             DWORD granularity = 0;
+            const ResetWindow window(ownedResets, clear);
             if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(first), stop - first, found.data(), &reported, &granularity) != 0) fail("collect resident guest writes");
+            reported = watchTaken(found.data(), reported, found.size(), first, stop, clear);
             for (ULONG_PTR index = 0; index < reported; ++index) written.push_back(reinterpret_cast<std::uintptr_t>(found[index]));
         }
         auto next = written.begin();
         std::uintptr_t resetFrom = 0;
         const auto flushReset = [&](std::uintptr_t to) {
-            if (resetFrom != 0 && ResetWriteWatch(reinterpret_cast<void*>(resetFrom), to - resetFrom) != 0) fail("reset resident guest writes");
+            if (resetFrom == 0) return;
+            if (ownedLive == 0) {
+                if (ResetWriteWatch(reinterpret_cast<void*>(resetFrom), to - resetFrom) != 0) fail("reset resident guest writes");
+                resetFrom = 0;
+                return;
+            }
+            const ResetWindow window(ownedResets, true);
+            thread_local std::vector<void*> taken;
+            taken.resize((to - resetFrom + 4095) / 4096);
+            ULONG_PTR reported = taken.size();
+            DWORD granularity = 0;
+            if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, reinterpret_cast<void*>(resetFrom), to - resetFrom, taken.data(), &reported, &granularity) != 0) fail("reset resident guest writes");
+            for (ULONG_PTR i = 0; i < reported; ++i) disownWritten(reinterpret_cast<std::uintptr_t>(taken[i]));
             resetFrom = 0;
         };
         for (auto at = first; at < stop; at += 4096) {
@@ -686,42 +1162,332 @@ private:
         if (collection == Collection::Fresh) flushReset(stop);
     }
 
-    void resumeResidentWrites(std::uintptr_t address) {
-        const auto run = std::prev(residentRuns.upper_bound(address));
-        run->second.writeObserved = true;
-        forgetClean(run->first, run->second.end);
-        auto first = views.lower_bound(run->first);
-        while (first != views.end() && first->first < run->second.end) {
-            const auto begin = first->first;
-            auto end = begin;
-            const auto protection = first->second.protection;
-            auto next = first;
-            bool armed = false;
-            do {
-                armed = armed || next->second.armed != 0;
-                end = next->first + pageBytes;
-                ++next;
-            } while (next != views.end() && next->first == end && end < run->second.end && next->second.protection == protection);
-            if (armed) {
-                DWORD previous;
-                if (!VirtualProtect(reinterpret_cast<void*>(begin), end - begin, protection, &previous)) fail("resume resident guest writes");
-            }
-            for (; first != next; ++first) first->second.armed = 0;
+    static constexpr std::uintptr_t ownedAddressLimit = std::uintptr_t{1} << 47;
+    static constexpr std::size_t ownedLeafBlocks = std::size_t{1} << 16;
+    static constexpr unsigned ownedLeafShift = 32;
+    static constexpr std::size_t ownedLeafCount = static_cast<std::size_t>(ownedAddressLimit >> ownedLeafShift);
+    static_assert(ownedLeafBlocks * ownedBlockBytes == (std::uint64_t{1} << ownedLeafShift));
+
+    std::uint64_t ownedWord(std::uintptr_t block) const {
+        const auto* leaf = ownedLeaves[block >> ownedLeafShift].load(std::memory_order_acquire);
+        return leaf != nullptr ? leaf[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)].load(std::memory_order_relaxed) : 0;
+    }
+
+    // The block's word, its leaf made on first use (under the mutex; leaves live as long as the
+    // mappings, so a lock-free reader never sees one go).
+    std::atomic<std::uint64_t>& ownedSlot(std::uintptr_t block) {
+        auto& entry = ownedLeaves[block >> ownedLeafShift];
+        auto* leaf = entry.load(std::memory_order_relaxed);
+        if (leaf == nullptr) {
+            ownedChecked[block >> ownedLeafShift].store(new std::atomic<std::uint64_t>[ownedLeafBlocks](), std::memory_order_release);
+            leaf = new std::atomic<std::uint64_t>[ownedLeafBlocks]();
+            entry.store(leaf, std::memory_order_release);
+        }
+        return leaf[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)];
+    }
+
+    static constexpr std::size_t ownedPagesPerBlock = ownedBlockBytes / subpageBytes;
+
+    // The allocation each 4 KiB page of an armed block belongs to (0: not mapped, proved by the word
+    // alone: every path that makes it present moves the word first).
+    using OwnedLayout = std::array<std::uintptr_t, ownedPagesPerBlock>;
+    struct OwnedPlan {
+        OwnedLayout layout{};
+        bool privatePages = false;
+        bool mapped = false;
+        bool unmapped = false;
+    };
+    struct OwnedRun {
+        std::uintptr_t begin;
+        std::uintptr_t end;
+        std::uintptr_t allocation;
+    };
+
+    static bool overlapsRange(const std::multimap<std::uintptr_t, std::uintptr_t>& ranges, std::uintptr_t begin, std::uintptr_t end) {
+        for (auto it = ranges.begin(); it != ranges.end() && it->first < end; ++it) {
+            if (it->second > begin) return true;
+        }
+        return false;
+    }
+
+    static void eraseRange(std::multimap<std::uintptr_t, std::uintptr_t>& ranges, std::uintptr_t begin, std::uintptr_t end) {
+        for (auto it = ranges.lower_bound(begin); it != ranges.end() && it->first == begin; ++it) {
+            if (it->second != end) continue;
+            ranges.erase(it);
+            return;
         }
     }
 
-    bool armResident(std::uintptr_t from, std::uintptr_t stop) {
-        const auto first = views.lower_bound(from & ~(pageBytes - 1));
-        if (first == views.end() || !writable(first->second.protection)) return false;
-        const auto protection = first->second.protection;
-        for (auto it = first; it != views.end() && it->first < stop; ++it) {
-            if (!it->second.resident || it->second.protection != protection || it->second.hostWrites != 0 || it->second.hostImports != 0 || it->second.page->pins != 0) return false;
+    // Appends the mapped pages of `block` inside [from, to) to `runs`, the last run extended while the
+    // pages are contiguous and in one allocation (GetWriteWatch cannot span two).
+    static void appendRuns(std::vector<OwnedRun>& runs, std::uintptr_t block, const OwnedLayout& layout, std::uintptr_t from, std::uintptr_t to) {
+        for (std::size_t page = 0; page < ownedPagesPerBlock; ++page) {
+            const auto at = block + page * subpageBytes;
+            if (at < from || at >= to || layout[page] == 0) continue;
+            if (!runs.empty() && runs.back().end == at && runs.back().allocation == layout[page]) runs.back().end = at + subpageBytes;
+            else runs.push_back({at, at + subpageBytes, layout[page]});
         }
-        DWORD previous;
-        const auto readOnly = protection == PAGE_EXECUTE_READWRITE ? PAGE_EXECUTE_READ : PAGE_READONLY;
-        if (!VirtualProtect(reinterpret_cast<void*>(from), stop - from, readOnly, &previous)) fail("arm resident memory write tracking");
-        for (auto it = first; it != views.end() && it->first < stop; ++it) it->second.armed |= subpagesOf(it->first, from, stop);
+    }
+
+    // Whether a page of [begin, end), inside one allocation, was written since its bit was last reset;
+    // nothing when the range is not write-watched memory.
+    static std::optional<bool> queryWatch(std::uintptr_t begin, std::uintptr_t end) {
+        ULONG_PTR reported = 1;
+        void* page = nullptr;
+        DWORD granularity = 0;
+        if (GetWriteWatch(0, reinterpret_cast<void*>(begin), end - begin, &page, &reported, &granularity) != 0) return std::nullopt;
+        return reported != 0;
+    }
+
+    // Arming's reset of [begin, end) (pages of blocks not armed yet): the written pages it takes are
+    // kept in ownedPending for the next collects.
+    void takeWrites(std::uintptr_t begin, std::uintptr_t end) {
+        std::array<void*, 256> found;
+        for (auto cursor = begin; cursor < end;) {
+            ULONG_PTR reported = found.size();
+            DWORD granularity = 0;
+            if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, reinterpret_cast<void*>(cursor), end - cursor, found.data(), &reported, &granularity) != 0) fail("take owned guest writes");
+            for (ULONG_PTR i = 0; i < reported; ++i) {
+                const auto page = reinterpret_cast<std::uintptr_t>(found[i]);
+                ownedPending.insert(page);
+                forgetClean(page, page + subpageBytes);
+            }
+            ownedTaken.fetch_add(reported, std::memory_order_relaxed);
+            if (reported < found.size()) break;
+            cursor = reinterpret_cast<std::uintptr_t>(found[reported - 1]) + subpageBytes;
+        }
+    }
+
+    // After a collect's GetWriteWatch over [first, stop): `pages` holds the `reported` written pages
+    // in address order and has room for `room`. A clearing collect moves the word of every armed
+    // block whose written page it took. The pages ArmOwned took in the range join the report (and
+    // leave ownedPending when clearing); written pages past `room` wait in ownedPending instead.
+    // Returns the number of pages reported.
+    std::size_t watchTaken(void** pages, std::size_t reported, std::size_t room, std::uintptr_t first, std::uintptr_t stop, bool clear) {
+        if (clear && ownedLive != 0) {
+            for (std::size_t i = 0; i < reported; ++i) disownWritten(reinterpret_cast<std::uintptr_t>(pages[i]));
+        }
+        if (ownedPending.empty()) return reported;
+        const auto low = ownedPending.lower_bound(first & ~std::uintptr_t{subpageBytes - 1});
+        const auto high = ownedPending.lower_bound(stop);
+        if (low == high) return reported;
+        thread_local std::vector<std::uintptr_t> merged;
+        merged.clear();
+        std::size_t index = 0;
+        for (auto it = low; index < reported || it != high;) {
+            const auto next = index < reported ? reinterpret_cast<std::uintptr_t>(pages[index]) : UINTPTR_MAX;
+            const auto held = it != high ? *it : UINTPTR_MAX;
+            merged.push_back(std::min(next, held));
+            if (next <= held) ++index;
+            if (held <= next) ++it;
+        }
+        const auto kept = std::min(room, merged.size());
+        if (clear) {
+            for (std::size_t k = 0; k < merged.size(); ++k) {
+                if (k < kept) ownedPending.erase(merged[k]);
+                else ownedPending.insert(merged[k]);
+            }
+        }
+        for (std::size_t k = 0; k < kept; ++k) pages[k] = reinterpret_cast<void*>(merged[k]);
+        return kept;
+    }
+
+    // Whether a mapped page of an armed block was written since it was armed (or the query failed).
+    bool blockWritten(std::uintptr_t block) {
+        const auto found = ownedLayouts.find(block);
+        if (found == ownedLayouts.end()) return true;
+        thread_local std::vector<OwnedRun> runs;
+        runs.clear();
+        appendRuns(runs, block, found->second, block, block + ownedBlockBytes);
+        for (const auto& run : runs) {
+            const auto written = queryWatch(run.begin, run.end);
+            if (!written.has_value() || *written) return true;
+        }
+        return false;
+    }
+
+    void forgetPending(std::uintptr_t start, std::uintptr_t end) {
+        if (ownedPending.empty()) return;
+        ownedPending.erase(ownedPending.lower_bound(start), ownedPending.lower_bound(end));
+    }
+
+    enum class OwnedAnswer : std::uint8_t { Holds, Written, Moved, Unsure };
+
+    // OwnedUnchanged's queries and the words after them. Written: a page of the range has its write
+    // bit (a store after the arming, which reset the bits); Moved: a word moved or the range is not
+    // armed; Unsure: a query failed while the words held.
+    OwnedAnswer ownedQuery(std::uintptr_t address, std::size_t bytes, std::uintptr_t first, std::uintptr_t stop, const std::uint64_t* words) {
+        thread_local std::vector<OwnedRun> runs;
+        runs.clear();
+        const auto from = address & ~std::uintptr_t{subpageBytes - 1};
+        const auto to = (address + bytes + subpageBytes - 1) & ~std::uintptr_t{subpageBytes - 1};
+        {
+            std::lock_guard layouts(ownedMutex);
+            for (auto block = first; block < stop; block += ownedBlockBytes) {
+                const auto found = ownedLayouts.find(block);
+                if (found == ownedLayouts.end()) return OwnedAnswer::Moved;
+                appendRuns(runs, block, found->second, from, to);
+            }
+        }
+        for (const auto& run : runs) {
+            ownedQueries.fetch_add(1, std::memory_order_relaxed);
+            const auto written = queryWatch(run.begin, run.end);
+            if (!written.has_value()) return wordsHold(first, stop, words) ? OwnedAnswer::Unsure : OwnedAnswer::Moved;
+            if (*written) {
+                ownedDirty.fetch_add(1, std::memory_order_relaxed);
+                return OwnedAnswer::Written;
+            }
+        }
+        return wordsHold(first, stop, words) ? OwnedAnswer::Holds : OwnedAnswer::Moved;
+    }
+
+    // Brackets a reset of write bits and the word moves it implies (see OwnedUnchanged).
+    struct ResetWindow {
+        std::atomic<std::uint64_t>& resets;
+        bool open;
+        ResetWindow(std::atomic<std::uint64_t>& resets, bool clear) : resets(resets), open(clear) {
+            if (open) resets.fetch_add(1, std::memory_order_seq_cst);
+        }
+        ~ResetWindow() {
+            if (open) resets.fetch_add(1, std::memory_order_seq_cst);
+        }
+        ResetWindow(const ResetWindow&) = delete;
+        ResetWindow& operator=(const ResetWindow&) = delete;
+    };
+
+    bool wordsHold(std::uintptr_t first, std::uintptr_t stop, const std::uint64_t* words) const {
+        std::size_t index = 0;
+        for (auto block = first; block < stop; block += ownedBlockBytes, ++index) {
+            const auto* leaf = ownedLeaves[block >> ownedLeafShift].load(std::memory_order_acquire);
+            if (leaf == nullptr) return false;
+            const auto word = leaf[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)].load(std::memory_order_seq_cst);
+            if ((word & 1u) == 0 || word != words[index]) return false;
+        }
         return true;
+    }
+
+    // OwnedUnchanged's answer from queries (see there).
+    bool unchangedNow(std::uintptr_t address, std::size_t bytes, std::uintptr_t first, std::uintptr_t stop, const std::uint64_t* words) {
+        const auto before = ownedResets.load(std::memory_order_seq_cst);
+        if (!wordsHold(first, stop, words)) return false;
+        if ((before & 1u) == 0) {
+            const auto answer = ownedQuery(address, bytes, first, stop, words);
+            if (answer == OwnedAnswer::Written || answer == OwnedAnswer::Moved) return false;
+            if (answer == OwnedAnswer::Holds && ownedResets.load(std::memory_order_seq_cst) == before) return true;
+        }
+        ownedLocked.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lock(mutex);
+        return ownedQuery(address, bytes, first, stop, words) == OwnedAnswer::Holds;
+    }
+
+    // Every block checked at a clock value >= mark (each check read first, acquire) and still armed
+    // with its word (read after).
+    bool checkedSince(std::uintptr_t first, std::uintptr_t stop, const std::uint64_t* words, std::uint64_t mark) const {
+        for (auto block = first; block < stop; block += ownedBlockBytes) {
+            const auto* checked = ownedChecked[block >> ownedLeafShift].load(std::memory_order_acquire);
+            if (checked == nullptr || checked[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)].load(std::memory_order_acquire) < mark) return false;
+        }
+        return wordsHold(first, stop, words);
+    }
+
+    // Stores `clock` as the blocks' check (release, after the queries and the words they were
+    // answered with). A smaller value stored over a larger one only asks for a query sooner.
+    void markChecked(std::uintptr_t first, std::uintptr_t stop, std::uint64_t clock) {
+        for (auto block = first; block < stop; block += ownedBlockBytes) {
+            auto* checked = ownedChecked[block >> ownedLeafShift].load(std::memory_order_acquire);
+            if (checked != nullptr) checked[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)].store(clock, std::memory_order_release);
+        }
+    }
+
+    // Every 16 KiB page a single resident view (write-watched when watchResident), else 4 KiB pages
+    // that are private commits (with `allowPrivate`; write watching is checked by ArmOwned) or reserved
+    // placeholders. Views and pages may be read-write or read-only (with or without execute). Pinned
+    // ranges (guest stacks, whose pages libkernel commits itself at thread exit) are refused whatever
+    // their kind.
+    OwnedRefusal ownable(std::uintptr_t block, bool allowPrivate, OwnedPlan& plan) {
+        const auto end = block + ownedBlockBytes;
+        std::uintptr_t regionBegin = 0;
+        std::uintptr_t regionEnd = 0;
+        std::uintptr_t regionAllocation = 0;
+        for (auto at = block; at < end; at += pageBytes) {
+            const auto found = views.find(at);
+            if (found != views.end()) {
+                const auto& view = found->second;
+                if (!view.resident || view.page->aliases.size() != 1 || view.viewBytes != pageBytes) return OwnedRefusal::Shared;
+                if (!watchResident) return OwnedRefusal::Unwatched;
+                if (!ownedReadable(view.protection)) return OwnedRefusal::NotWritable;
+                if (view.hostWrites != 0) return OwnedRefusal::HostWrite;
+                if (view.hostImports != 0 || view.page->pins != 0) return OwnedRefusal::Pinned;
+                if (at < regionBegin || at + pageBytes > regionEnd) {
+                    const auto memory = query(at);
+                    if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return OwnedRefusal::NotWritable;
+                    regionBegin = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+                    regionEnd = regionBegin + memory.RegionSize;
+                    regionAllocation = reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
+                }
+                for (auto page = at; page < at + pageBytes; page += subpageBytes) plan.layout[(page - block) / subpageBytes] = regionAllocation;
+                plan.mapped = true;
+                continue;
+            }
+            for (auto cursor = at; cursor < at + pageBytes;) {
+                const auto memory = query(cursor);
+                const auto stop = std::min(at + pageBytes, reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize);
+                if (memory.State == MEM_COMMIT) {
+                    if (memory.Type != MEM_PRIVATE || (memory.Protect & ~0xffu) != 0 || !ownedReadable(memory.Protect)) return OwnedRefusal::NotWritable;
+                    if (!allowPrivate) return OwnedRefusal::Private;
+                    for (auto page = cursor; page < stop; page += subpageBytes) plan.layout[(page - block) / subpageBytes] = reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
+                    plan.privatePages = true;
+                    plan.mapped = true;
+                } else if (memory.State == MEM_RESERVE) {
+                    plan.unmapped = true;
+                } else {
+                    return OwnedRefusal::NotWritable;
+                }
+                cursor = stop;
+            }
+        }
+        if (overlapsRange(pinnedRanges, block, end)) return OwnedRefusal::Pinned;
+        if (plan.privatePages && overlapsRange(hostAccess, block, end)) return OwnedRefusal::HostWrite;
+        return OwnedRefusal::None;
+    }
+
+    static bool ownedReadable(DWORD protection) {
+        return protection == PAGE_READWRITE || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_READONLY || protection == PAGE_EXECUTE_READ;
+    }
+
+    // Disarms an armed block: its word moves, counted in `reason`.
+    void disownBlock(std::uintptr_t block, std::atomic<std::uint64_t>& reason) {
+        auto* leaf = ownedLeaves[block >> ownedLeafShift].load(std::memory_order_relaxed);
+        if (leaf == nullptr) return;
+        auto& slot = leaf[(block / ownedBlockBytes) & (ownedLeafBlocks - 1)];
+        const auto word = slot.load(std::memory_order_relaxed);
+        if ((word & 1u) == 0) return;
+        slot.store(word + 1, std::memory_order_seq_cst);
+        --ownedLive;
+        reason.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard layouts(ownedMutex);
+        ownedLayouts.erase(block);
+    }
+
+    void disownWritten(std::uintptr_t page) {
+        if (page < ownedAddressLimit) disownBlock(page & ~std::uintptr_t{ownedBlockBytes - 1}, ownedCollected);
+    }
+
+    void disownRange(std::uintptr_t start, std::uintptr_t end, std::atomic<std::uint64_t>* reason = nullptr) {
+        if (guardedSubpages.load(std::memory_order_acquire) != 0 && end > start) {
+            const auto guarded = accessGuards.lower_bound(start & ~std::uintptr_t{subpageBytes - 1});
+            if (guarded != accessGuards.end() && guarded->first < end) fail("a mapping, protection or host-access change over an access-guarded page");
+        }
+        if (ownedLive == 0 || end <= start) return;
+        end = std::min(end, ownedAddressLimit);
+        for (auto block = start & ~std::uintptr_t{ownedBlockBytes - 1}; block < end && ownedLive != 0;) {
+            if (ownedLeaves[block >> ownedLeafShift].load(std::memory_order_relaxed) == nullptr) {
+                block = ((block >> ownedLeafShift) + 1) << ownedLeafShift;
+                continue;
+            }
+            disownBlock(block, reason != nullptr ? *reason : ownedDisowned);
+            block += ownedBlockBytes;
+        }
     }
 
     Window open(HANDLE section, std::uint64_t offset, std::size_t bytes) {
@@ -747,12 +1513,23 @@ private:
         return (bytes + subpageBytes - 1) & ~(subpageBytes - 1);
     }
 
-    void mapShared(std::uintptr_t base, HANDLE section, std::uint64_t offset, DWORD protection, DWORD viewProtection = PAGE_EXECUTE_READWRITE, std::size_t sectionBytes = pageBytes) {
+    void commitSection(HANDLE section, std::uint64_t offset, std::size_t bytes) {
+        auto window = open(section, offset, bytes);
+        const auto memory = query(reinterpret_cast<std::uintptr_t>(window.bytes));
+        if ((memory.State != MEM_COMMIT || memory.RegionSize < bytes) && !VirtualAlloc(window.bytes, bytes, MEM_COMMIT, PAGE_READWRITE)) {
+            const auto error = GetLastError();
+            close(window);
+            throw std::system_error(static_cast<int>(error), std::system_category(), "commit direct memory pages");
+        }
+        close(window);
+    }
+
+    void mapShared(std::uintptr_t base, HANDLE section, std::uint64_t offset, DWORD protection, DWORD viewProtection = PAGE_EXECUTE_READWRITE, std::size_t sectionBytes = pageBytes, bool committed = false) {
         void* page = reinterpret_cast<void*>(base);
         const auto viewBytes = hostPages(sectionBytes);
         if (viewBytes != pageBytes) split(base, viewBytes);
         if (!map(section, GetCurrentProcess(), page, offset, sectionBytes, MEM_REPLACE_PLACEHOLDER, viewProtection, nullptr, 0)) fail("map shared guest page");
-        if (query(base).State == MEM_RESERVE && !VirtualAlloc(page, viewBytes, MEM_COMMIT, PAGE_EXECUTE_READWRITE)) fail("commit shared guest page");
+        if (!committed && query(base).State == MEM_RESERVE && !VirtualAlloc(page, viewBytes, MEM_COMMIT, PAGE_EXECUTE_READWRITE)) fail("commit shared guest page");
         DWORD previous;
         if (!VirtualProtect(page, viewBytes, protection, &previous)) fail("protect shared guest page");
         if (viewBytes == pageBytes) return;
@@ -766,6 +1543,47 @@ private:
         slot.saved.reset();
     }
 
+    void mapRun(std::uintptr_t base, std::size_t bytes, HANDLE section, std::uint64_t offset) {
+        if (!map(section, GetCurrentProcess(), reinterpret_cast<void*>(base), offset, bytes, MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READWRITE, nullptr, 0)) fail("map a run of shared guest pages");
+    }
+
+    void breakView(std::uintptr_t at) {
+        const auto memory = query(at);
+        if (memory.State == MEM_FREE || memory.Type != MEM_MAPPED) return;
+        const auto start = reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
+        if (start == at) return;
+        const auto first = views.find(start);
+        if (first == views.end()) return;
+        struct Part {
+            std::uintptr_t base;
+            std::uintptr_t end;
+            DWORD protection;
+            bool committed;
+        };
+        std::vector<Part> parts;
+        auto stop = start;
+        for (;;) {
+            const auto part = query(stop);
+            if (part.AllocationBase != memory.AllocationBase) break;
+            const auto partEnd = reinterpret_cast<std::uintptr_t>(part.BaseAddress) + part.RegionSize;
+            parts.push_back({stop, partEnd, part.Protect, part.State == MEM_COMMIT});
+            stop = partEnd;
+        }
+        const auto section = first->second.section;
+        const auto offset = first->second.offset;
+        if (!unmap(GetCurrentProcess(), reinterpret_cast<void*>(start), MEM_PRESERVE_PLACEHOLDER)) fail("unmap a run of shared guest pages to split it");
+        split(start, at - start);
+        mapRun(start, at - start, section->handle, offset);
+        mapRun(at, stop - at, section->handle, offset + (at - start));
+        for (const auto& part : parts) {
+            if (!part.committed) continue;
+            for (const auto [from, to] : {std::pair{part.base, std::min(part.end, at)}, std::pair{std::max(part.base, at), part.end}}) {
+                DWORD previous;
+                if (from < to && !VirtualProtect(reinterpret_cast<void*>(from), to - from, part.protection, &previous)) fail("protect a split run of shared guest pages");
+            }
+        }
+    }
+
     static bool blank(std::uintptr_t page) {
         const auto* words = reinterpret_cast<const std::uint64_t*>(page);
         for (std::size_t i = 0; i < pageBytes / sizeof(std::uint64_t); ++i) {
@@ -774,10 +1592,12 @@ private:
         return true;
     }
 
-    void demote(std::uintptr_t address) {
+    void demote(std::uintptr_t address, bool alias = false) {
         const auto run = std::prev(residentRuns.upper_bound(address));
         const auto start = run->first;
         const auto stop = run->second.end;
+        disownRange(start, stop);
+        forgetPending(start, stop);
         DWORD previous;
         if (!VirtualProtect(reinterpret_cast<void*>(start), stop - start, PAGE_READONLY, &previous)) fail("fence resident guest pages");
         const auto section = views.at(start).section;
@@ -792,6 +1612,8 @@ private:
             mapShared(page, view.section->handle, view.offset, view.protection);
             view.slot->stored = true;
             view.resident = false;
+            view.aliasDemoted = alias;
+            view.unreported = view.page->comparedWhenShared ? allSubpages : std::uint8_t{0};
             view.seen.fill(0);
             view.armed = 0;
             view.collected = 0;
@@ -813,6 +1635,8 @@ private:
     void evict(std::map<std::uintptr_t, Run>::iterator run) {
         const auto start = run->first;
         const auto stop = run->second.end;
+        disownRange(start, stop);
+        forgetPending(start, stop);
         DWORD previous;
         if (!VirtualProtect(reinterpret_cast<void*>(start), stop - start, PAGE_READONLY, &previous)) fail("open resident guest pages");
         std::shared_ptr<Saved> saved;
@@ -955,7 +1779,7 @@ private:
         return memory;
     }
 
-    static void split(std::uintptr_t address, std::size_t bytes) {
+    static std::uintptr_t split(std::uintptr_t address, std::size_t bytes) {
         auto memory = query(address);
         memory = query(reinterpret_cast<std::uintptr_t>(memory.AllocationBase));
         if (memory.State != MEM_RESERVE) throw std::runtime_error("guest mapping requires a placeholder");
@@ -966,14 +1790,19 @@ private:
         }
         if (memory.RegionSize < bytes) throw std::runtime_error("guest placeholder is too small");
         if (memory.RegionSize != bytes && !VirtualFree(reinterpret_cast<void*>(address), bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail("split guest placeholder suffix");
+        return address + memory.RegionSize;
     }
 
     void reset(std::uintptr_t address, std::size_t bytes) {
         collectableRanges.clear();
         const auto end = address + bytes;
+        disownRange(address, end);
+        forgetPending(address, end);
         forgetClean(address, end);
         breakRun(address);
         breakRun(end);
+        breakView(address);
+        breakView(end);
         if (const auto run = residentRuns.find(address); run != residentRuns.end() && run->second.end == end) {
             const auto memory = query(address);
             if (reinterpret_cast<std::uintptr_t>(memory.AllocationBase) != address) throw std::runtime_error("cannot release part of a host allocation");
@@ -1005,12 +1834,11 @@ private:
             if (allocationEnd > end || query(allocationEnd).AllocationBase == memory.AllocationBase) throw std::runtime_error("guest release truncates a host allocation");
             if (memory.Type == MEM_MAPPED) {
                 if (!unmap(GetCurrentProcess(), reinterpret_cast<void*>(cursor), MEM_PRESERVE_PLACEHOLDER)) fail("unmap shared guest page");
-                const auto found = views.find(cursor);
-                if (found != views.end()) {
-                    std::erase(found->second.page->aliases, cursor);
-                    views.erase(found);
-                    forget(freshRanges, cursor, cursor + pageBytes);
+                for (auto found = views.lower_bound(cursor); found != views.end() && found->first < allocationEnd;) {
+                    std::erase(found->second.page->aliases, found->first);
+                    found = views.erase(found);
                 }
+                forget(freshRanges, cursor, allocationEnd);
             } else if (memory.Type == MEM_PRIVATE) {
                 if (const auto run = residentRuns.find(cursor); run != residentRuns.end()) evict(run);
                 if (!VirtualFree(reinterpret_cast<void*>(cursor), allocationEnd - cursor, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail("release private guest memory");
@@ -1084,10 +1912,47 @@ private:
     std::map<std::uintptr_t, std::size_t> splitAliases;
     std::size_t granularity = 0x10000;
     bool watchResident = false;
+    std::array<std::atomic<std::atomic<std::uint64_t>*>, ownedLeafCount> ownedLeaves{};
+    std::array<std::atomic<std::atomic<std::uint64_t>*>, ownedLeafCount> ownedChecked{};
+    std::atomic<std::uint64_t> ownedClock{1};
+    std::atomic<std::uint64_t> ownedEpochHeld{0};
+    std::atomic<std::uint64_t> ownedEpochQueried{0};
+    std::size_t ownedLive = 0;
+    std::uint32_t protectionsInFlight = 0;
+    std::atomic<std::uint64_t> ownedArms{0};
+    std::atomic<std::uint64_t> ownedArmedBlocks{0};
+    std::atomic<std::uint64_t> ownedRefused{0};
+    std::atomic<std::uint64_t> ownedFaults{0};
+    std::atomic<std::uint64_t> ownedDisowned{0};
+    std::atomic<std::uint64_t> ownedPrivateBlocks{0};
+    std::atomic<std::uint64_t> ownedUnmappedBlocks{0};
+    std::atomic<std::uint64_t> ownedPartialBlocks{0};
+    std::array<std::atomic<std::uint64_t>, OwnedRefusalCount> ownedReasons{};
+    std::atomic<std::uint64_t> ownedCollected{0};
+    std::atomic<std::uint64_t> ownedTaken{0};
+    std::atomic<std::uint64_t> ownedQueries{0};
+    std::atomic<std::uint64_t> ownedDirty{0};
+    std::unordered_map<std::uintptr_t, OwnedLayout> ownedLayouts;
+    std::mutex ownedMutex;
+    std::atomic<std::uint64_t> ownedResets{0};
+    std::atomic<std::uint64_t> ownedLocked{0};
+    std::set<std::uintptr_t> ownedPending;
+    std::multimap<std::uintptr_t, std::uintptr_t> pinnedRanges;
+    std::multimap<std::uintptr_t, std::uintptr_t> hostAccess;
 #ifdef APS5_COUNT_MAPPING_QUERIES
     static inline std::atomic<std::uint64_t> queries{0};
 #endif
-    std::mutex mutex;
+    MappingMutex mutex;
+    struct AccessGuard {
+        DWORD protection = 0;
+        std::uint64_t arm = 0;
+    };
+    std::map<std::uintptr_t, AccessGuard> accessGuards;
+    std::uint64_t guardArms = 0;
+    std::atomic<std::size_t> guardedSubpages{0};
+    std::atomic<bool> guardsUsed{false};
+    std::atomic<std::uint32_t> changesActive{0};
+    std::atomic<void (*)(std::uintptr_t)> accessGuardObserver{nullptr};
     AllocateFunction allocate = nullptr;
     MapFunction map = nullptr;
     UnmapFunction unmap = nullptr;

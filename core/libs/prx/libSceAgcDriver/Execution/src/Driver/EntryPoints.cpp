@@ -1,3 +1,5 @@
+#include "prx/libSceAgcDriver/Execution/include/BindlessPriming.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
@@ -19,9 +21,8 @@ void Submit(const Packet* packet, std::uint32_t queue) try {
         return;
     }
     GuestMemory::CheckRange(packet, sizeof(Packet), alignof(Packet));
-    recorder->Submit(*packet, queue);
     const auto flips = driver.FlipSubmissions();
-    driver.Submit(packet, queue);
+    recorder->Submit(*packet, queue, [&] { driver.Submit(packet, queue); });
     if (driver.FlipSubmissions() != flips) recorder->FrameBoundary();
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
@@ -41,8 +42,12 @@ void RegisterShader(const Shader* shader) {
 }
 
 void SuspendPoint() {
-    if (auto* const recorder = FrameRecorder::Active()) recorder->Suspend();
-    DriverDetail::Driver::Get().SuspendPoint();
+    auto* const recorder = FrameRecorder::Active();
+    if (recorder == nullptr) {
+        DriverDetail::Driver::Get().SuspendPoint();
+        return;
+    }
+    recorder->Suspend([] { DriverDetail::Driver::Get().SuspendPoint(); });
 }
 
 void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
@@ -138,6 +143,40 @@ extern "C" std::size_t AgcDriverAwaitedWaits_nid_postfix(AgcDriver::AwaitedWait*
     return count;
 }
 
+extern "C" std::vector<std::uint32_t> AgcDriverSaveQueueStates_nid_postfix() {
+    return AgcDriver::DriverDetail::Driver::Get().SaveQueueStates();
+}
+
+extern "C" void AgcDriverLoadQueueStates_nid_postfix(std::span<const std::uint32_t> words) {
+    AgcDriver::DriverDetail::Driver::Get().LoadQueueStates(words);
+}
+
+extern "C" std::vector<std::uint64_t> AgcDriverBindlessRegistrations_nid_postfix() {
+    return AgcDriver::BindlessRegistrationWords();
+}
+
+extern "C" void AgcDriverPrimeBindlessTables_nid_postfix(std::span<const std::uint64_t> words) try {
+    AgcDriver::PrimeBindlessTables(words);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
+}
+
+extern "C" void AgcDriverUseGdsAt_nid_postfix(std::uint64_t address) {
+    AgcDriver::Pm4::UseGdsAt(address);
+}
+
+extern "C" bool AgcDriverSettle_nid_postfix() {
+    return AgcDriver::DriverDetail::Driver::Get().SettleForCapture(std::chrono::seconds(10));
+}
+
+extern "C" bool AgcDriverFailed_nid_postfix() {
+    return AgcDriver::DriverDetail::Driver::Get().Failed();
+}
+
+extern "C" bool AgcDriverQuiescent_nid_postfix() {
+    return AgcDriver::DriverDetail::Driver::Get().Quiescent();
+}
+
 extern "C" void AgcDriverSerialProgress_nid_postfix(std::uint64_t* accepted, std::uint64_t* completed) {
     const auto [submitted, done] = AgcDriver::DriverDetail::Driver::Get().SerialProgress();
     *accepted = submitted;
@@ -146,15 +185,32 @@ extern "C" void AgcDriverSerialProgress_nid_postfix(std::uint64_t* accepted, std
 
 extern "C" void AgcDriverSubmitFlip_nid_postfix(const AgcDriver::FlipInfo& info) try {
     auto* const recorder = AgcDriver::FrameRecorder::Active();
-    if (recorder != nullptr) recorder->Flip(info);
-    AgcDriver::DriverDetail::Driver::Get().SubmitFlip(info);
-    if (recorder != nullptr) recorder->FrameBoundary();
+    if (recorder == nullptr) {
+        AgcDriver::DriverDetail::Driver::Get().SubmitFlip(info);
+        return;
+    }
+    recorder->Flip(info, [&] { AgcDriver::DriverDetail::Driver::Get().SubmitFlip(info); });
+    recorder->FrameBoundary();
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }
 
 extern "C" std::uint64_t AgcDriverDispatchesAdoptedAhead_nid_postfix() {
     return AgcDriver::DriverDetail::Driver::Get().DispatchesAdoptedAhead();
+}
+
+extern "C" void AgcDriverMissAheadTotals_nid_postfix(std::uint64_t* started, std::uint64_t* used) {
+    const auto [builds, uses] = AgcDriver::DriverDetail::Driver::MissAheadTotals();
+    *started = builds;
+    *used = uses;
+}
+
+extern "C" std::uint64_t AgcDriverDispatchesRejectedAhead_nid_postfix() {
+    return AgcDriver::DriverDetail::Driver::Get().DispatchesRejectedAhead();
+}
+
+extern "C" void AgcDriverSetAheadAdoptHook_nid_postfix(void (*hook)()) {
+    AgcDriver::DriverDetail::Driver::Get().SetAheadAdoptHook(hook);
 }
 
 extern "C" void AgcDriverRegisterVideoOutput_nid_postfix(std::uint32_t handle, const std::shared_ptr<AgcDriver::IVideoOutput>& output) {

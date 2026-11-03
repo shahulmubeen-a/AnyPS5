@@ -1,3 +1,4 @@
+#include "prx/libScePlayGo/include/Api.hpp"
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -35,6 +36,7 @@ struct ChunkTable {
     std::set<uint16_t> ids{0};
     bool defined = false;
     bool scenario = false;
+    bool scenarioListed = false;
 };
 
 static bool ReadPackageChunks(ChunkTable& table) {
@@ -70,7 +72,10 @@ static const ChunkTable& Chunks() {
             if (ReadPackageChunks(table)) return table;
             table.scenario = std::ifstream(ResolvePath_nid_no_patch("/app0/sce_sys/playgo-scenario.json")).good();
             if (!table.scenario) RejectUnreadablePlayGoFiles();
-            else if (std::getenv("APS5_PLAYGO_SCENARIO_CHUNKS") != nullptr) for (uint32_t id = 1; id < PLAYGO_SCENARIO_CHUNK_COUNT; ++id) table.ids.insert(static_cast<uint16_t>(id));
+            else if (std::getenv("APS5_PLAYGO_SCENARIO_CHUNKS") != nullptr) {
+                for (uint32_t id = 1; id < PLAYGO_SCENARIO_CHUNK_COUNT; ++id) table.ids.insert(static_cast<uint16_t>(id));
+                table.scenarioListed = true;
+            }
             return table;
         }
         table.defined = true;
@@ -106,13 +111,16 @@ static UnlistedChunkAnswer UnlistedChunks() {
 
 static bool IsKnownChunk(uint16_t id) {
     const auto& chunks = Chunks();
-    if (chunks.defined) return chunks.ids.contains(id);
-    if (chunks.scenario || id == 0) return true;
+    if (chunks.ids.contains(id)) return true;
+    if (chunks.defined) return false;
+    if (chunks.scenario && !chunks.scenarioListed) return true;
     switch (UnlistedChunks()) {
     case UnlistedChunkAnswer::Installed: return true;
     case UnlistedChunkAnswer::Absent: return false;
     case UnlistedChunkAnswer::Stop: break;
     }
+    if (chunks.scenario)
+        throw std::runtime_error("scePlayGo: sce_sys/playgo-chunk.dat is missing and sce_sys/playgo-scenario.json lists no chunks, so chunk ID " + std::to_string(id) + " outside the listed ids 0 to " + std::to_string(PLAYGO_SCENARIO_CHUNK_COUNT - 1) + " cannot be checked; set APS5_PLAYGO_UNLISTED_CHUNKS=installed or =absent to answer for this dump");
     throw std::runtime_error("scePlayGo: sce_sys/playgo-chunk.dat and sce_sys/playgo-scenario.json are missing, so chunk ID " + std::to_string(id) + " cannot be checked; set APS5_PLAYGO_UNLISTED_CHUNKS=installed or =absent to answer for this dump");
 }
 
