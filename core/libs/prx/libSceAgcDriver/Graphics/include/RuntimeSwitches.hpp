@@ -111,6 +111,7 @@ enum class RuntimeSwitch : std::size_t {
     ThreadPinning,
     DeferLabelStore,
     IndirectLabelArguments,
+    ReadOnlyBdaItems,
     Count,
 };
 
