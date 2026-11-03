@@ -1,5 +1,6 @@
 #include "Optimization/TessellationLowering.hpp"
 #include "Optimization/DeadCodeEliminator.hpp"
+#include "Optimization/QuadHelperProof.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstdint>
@@ -47,7 +48,7 @@ std::optional<Affine> CommonMultiple(const Affine& left, const Affine& right) {
 }
 
 [[noreturn]] void Fail(const char* reason, std::uint32_t pc) {
-    char text[256];
+    char text[640];
     std::snprintf(text, sizeof(text), "tessellation lowering: %s at pc 0x%x", reason, pc);
     throw std::runtime_error(text);
 }
@@ -650,7 +651,10 @@ public:
             requireUniformBarriers();
             requireOwnLanes();
         }
-        if (stage == IrShaderStage::TessellationControl) lowerOwnLaneBits();
+        if (stage == IrShaderStage::TessellationControl) {
+            lowerOwnLaneBits();
+            lowerQuadOwnLaneBits();
+        }
         collect();
         derive();
         for (const auto& access : accesses) rewrite(access);
@@ -697,6 +701,82 @@ private:
         ResolveControlFlowIdentities(program);
         constexpr DeadCodeEliminator identities;
         identities.RemoveIdentities(program);
+    }
+
+    // A hull program that reads its own bit of s_wqm_b64 over a ballot of a per-lane test p (WqmU64 of the ballot's
+    // words) differs from reading p only on quad-helper lanes: lanes whose own test is false while a lane of their
+    // quad passes it. One invocation cannot see its quad, so the bit is lowered to p only when QuadHelperProof shows
+    // that nothing a helper lane computes through the bit is written, exported, handed to another lane or left live
+    // (PPSA26344's terrain, leaf and water hull programs: a rectangle walk that samples at LOD 0 for the first
+    // rectangle holding the vertex, whose helper iterations are reset at the loop header). Anything else is refused
+    // with its own reason, as before.
+    void lowerQuadOwnLaneBits() {
+        constexpr DeadCodeEliminator deadCodeEliminator;
+        deadCodeEliminator.Eliminate(program);
+        std::vector<IrValue*> masks;
+        std::map<IrValue*, std::vector<IrValue*>> readsOf;
+        for (IrBlock* block : program.BlockOrder()) {
+            for (IrValue* inst : block->Instructions()) {
+                const auto words = LaneBitWords(inst, program.WaveSize());
+                if (!words) continue;
+                IrValue* low = words->first;
+                if (low->Opcode() != IrOpcode::CompositeExtractU64) continue;
+                IrValue* wqm = low->Argument(0)->Resolve();
+                if (wqm->Opcode() != IrOpcode::WqmU64) continue;
+                IrValue* high = words->second;
+                const bool halves = IsImmediate(low->Argument(1), 0u) && (program.WaveSize() != 64u || (high != nullptr && high->Opcode() == IrOpcode::CompositeExtractU64 && high->Argument(0)->Resolve() == wqm && IsImmediate(high->Argument(1), 1u)));
+                if (!halves) quadFail(*wqm, "the lane's bit is not read from the matching half of the mask");
+                auto& reads = readsOf[wqm];
+                if (reads.empty()) masks.push_back(wqm);
+                reads.push_back(inst);
+            }
+        }
+        if (masks.empty()) return;
+        LaneBits laneBits(program);
+        for (IrValue* wqm : masks) {
+            const auto& reads = readsOf.at(wqm);
+            requireOwnBitReads(*wqm, reads);
+            IrValue* source = wqm->Argument(0)->Resolve();
+            if (source->Opcode() != IrOpcode::CompositeConstructU64 || source->ArgumentCount() != 2u) quadFail(*wqm, "the mask is not a whole-quad mask of a lane mask's two words");
+            IrValue* predicate = laneBits.Of(LaneWords{source->Argument(0)->Resolve(), program.WaveSize() == 64u ? source->Argument(1)->Resolve() : nullptr});
+            if (predicate == nullptr) quadFail(*wqm, "the mask is not a whole-quad mask of a ballot of a per-lane test");
+            if (const std::string refusal = ProveQuadHelpersUnobserved(program, *wqm, reads, *predicate); !refusal.empty()) quadFail(*wqm, refusal.c_str());
+            for (IrValue* read : reads) read->ReplaceUsesWith(predicate, true);
+        }
+        ResolveControlFlowIdentities(program);
+        deadCodeEliminator.RemoveIdentities(program);
+        deadCodeEliminator.Eliminate(program);
+    }
+
+    // Every use of the mask must be part of one of the own-lane bit reads (the words, the lane split, the shift and
+    // the mask of bit 0): a count, a whole-mask branch or another lane's bit sees the quad.
+    void requireOwnBitReads(const IrValue& wqm, const std::vector<IrValue*>& reads) const {
+        std::unordered_set<const IrValue*> parts{&wqm};
+        for (IrValue* read : reads) {
+            IrValue* masked = VariableOperand(read, 0u);
+            IrValue* shifted = VariableOperand(masked, 1u);
+            IrValue* word = shifted->Argument(0)->Resolve();
+            parts.insert(masked);
+            parts.insert(shifted);
+            parts.insert(word);
+            if (word->Opcode() == IrOpcode::SelectU32) {
+                parts.insert(word->Argument(1)->Resolve());
+                parts.insert(word->Argument(2)->Resolve());
+            }
+        }
+        const std::unordered_set<const IrValue*> readSet(reads.begin(), reads.end());
+        for (const IrValue* part : parts) {
+            for (const IrValue* user : part->Uses()) {
+                if (parts.contains(user) || readSet.contains(user)) continue;
+                const std::string text = "the mask is read other than as the lane's own bit, by %" + std::to_string(user->Id()) + " (" + std::string(IrOpcodeName(user->Opcode())) + ")";
+                quadFail(wqm, text.c_str());
+            }
+        }
+    }
+
+    [[noreturn]] static void quadFail(const IrValue& wqm, const char* reason) {
+        const std::string text = "the hull program reads its own bit of a whole-quad lane mask (%" + std::to_string(wqm.Id()) + " WqmU64) that a quad-helper lane can observe: " + reason;
+        Fail(text.c_str(), 0u);
     }
 
     void collect() {

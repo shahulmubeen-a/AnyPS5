@@ -528,6 +528,7 @@ bool Replay(const char* path, std::unique_ptr<AgcDriver::VulkanDevice>& device) 
         try {
             const auto handle = ShaderRecompiler::PrepareShader(request.request);
             std::printf("  prepared: %zu SPIR-V words\n", ShaderRecompiler::GetPreparedArtifact(*handle).spirv.size());
+            InspectSpirv(path, ShaderRecompiler::GetPreparedArtifact(*handle).spirv);
             if (g_materialize) {
                 phase = "prepared invocation";
                 const auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(request.request, handle);
