@@ -5813,7 +5813,10 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
         copyRegion(region, addressable);
         if (profile) copyUs += microsecondsSince(copyStart);
     }
-    if (heapsEnd > heapsBegin) StorageTexture::PublishShadowsOnly(heapsBegin, static_cast<std::size_t>(heapsEnd - heapsBegin), PublishScope::Whole, "address-based heaps");
+    // Experiment 2026-11-10 (local): APS5_DEFER_LABEL_STORE (a switch name without an implementation in this tree) skips the
+    // publish of every fresh shadow unit over the mapped heaps, to measure what these publishes cost. Pointer reads of
+    // retiled results then see the bytes of the last publish (the bug fe0383c0d6 fixed): a measurement, not a fix.
+    if (heapsEnd > heapsBegin && !RuntimeSwitches::Set(RuntimeSwitch::DeferLabelStore)) StorageTexture::PublishShadowsOnly(heapsBegin, static_cast<std::size_t>(heapsEnd - heapsBegin), PublishScope::Whole, "address-based heaps");
     if (!gpuCopies.empty()) recordGpuCopies(gpuCopies, addressable);
     takeHeapReferences();
     ResidentBuffer::FlushChanged(context);
