@@ -4331,14 +4331,18 @@ ShaderRecompiler::SpirvTarget VulkanDevice::buildTarget() const {
     target.narrowSubgroupClock = state->narrowSubgroupClock;
     target.float64DenormPreserve = state->float64DenormPreserve;
     target.fusedFma = state->fusedFma;
+    // The four options below replace exact emulation of the guest's float results with the host's own operations.
+    // On by default on AMD hosts; APS5_NATIVE_FLOAT=1 turns them on for any host (local experiment: on NVIDIA the
+    // results can differ from the guest's in the last bit and in NaN handling).
+    const bool nativeFloatHost = state->properties.vendorID == 0x1002u || std::getenv("APS5_NATIVE_FLOAT") != nullptr;
     // v_fma_mix* as a fused f32 Fma on AMD hosts (SpirvTarget::nativeMixF16); APS5_NO_NATIVE_MIX=1 keeps the exact path.
-    target.nativeMixF16 = state->properties.vendorID == 0x1002u && std::getenv("APS5_NO_NATIVE_MIX") == nullptr;
+    target.nativeMixF16 = nativeFloatHost && std::getenv("APS5_NO_NATIVE_MIX") == nullptr;
     // f16 FMA and packed f16 NaN results in hardware on AMD hosts (SpirvTarget::nativeF16Fma); APS5_NO_NATIVE_F16_FMA=1 off.
-    target.nativeF16Fma = state->properties.vendorID == 0x1002u && std::getenv("APS5_NO_NATIVE_F16_FMA") == nullptr;
+    target.nativeF16Fma = nativeFloatHost && std::getenv("APS5_NO_NATIVE_F16_FMA") == nullptr;
     // f32 min/max and saturate in hardware on AMD hosts (SpirvTarget::nativeF32MinMax); APS5_NO_NATIVE_MINMAX=1 off.
-    target.nativeF32MinMax = state->properties.vendorID == 0x1002u && std::getenv("APS5_NO_NATIVE_MINMAX") == nullptr;
+    target.nativeF32MinMax = nativeFloatHost && std::getenv("APS5_NO_NATIVE_MINMAX") == nullptr;
     // f32 NaN tests on the bits as one unordered compare on AMD hosts (SpirvTarget::nativeF32IsNan); APS5_NO_NATIVE_ISNAN=1 off.
-    target.nativeF32IsNan = state->properties.vendorID == 0x1002u && std::getenv("APS5_NO_NATIVE_ISNAN") == nullptr;
+    target.nativeF32IsNan = nativeFloatHost && std::getenv("APS5_NO_NATIVE_ISNAN") == nullptr;
     target.float16DenormPreserve = state->float16DenormPreserve;
     target.bindlessImages = state->bindlessImages;
     target.spannedWaves = state->spannedWaves;
