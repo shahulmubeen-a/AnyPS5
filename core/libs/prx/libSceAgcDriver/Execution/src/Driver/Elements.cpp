@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawTiming.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/EngineMarks.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DebugLabels.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -415,6 +416,14 @@ void Report();
 const bool enabled = [] {
     const bool on = std::getenv("APS5_ELEM") != nullptr || std::getenv("APS5_ELEM_FILE") != nullptr;
     if (on) std::thread(Report).detach();
+    // APS5_DEBUG_LABELS: the label of the packet being recorded (the committer's item, else the worker's packet)
+    // names a VK_EXT_debug_utils range (DebugLabels.hpp).
+    if (on && Graphics::DebugLabels::Enabled()) {
+        Graphics::DebugLabels::SetProvider({
+            +[]() -> std::uint32_t { return committing != nullptr ? committing->label : current.label; },
+            +[](std::uint32_t slot) -> std::string { return LabelText(slot); },
+        });
+    }
     return on;
 }();
 

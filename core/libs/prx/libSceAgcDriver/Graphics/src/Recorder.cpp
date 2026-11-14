@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DebugLabels.hpp"
 #include "prx/libkernel/Time/include/SleepWake.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
@@ -1388,6 +1389,7 @@ std::unordered_map<VkCommandBuffer, std::pair<std::uint64_t, int>> pendingComman
 std::uint64_t pendingCommandGenerations = 0;
 
 void NotePendingCommands(VkCommandBuffer commands, int lane) {
+    DebugLabels::Begun(commands);
     if (!Recorder::PendingCommandsTracked() || commands == VK_NULL_HANDLE) return;
     std::lock_guard lock(pendingCommandsMutex);
     pendingCommands[commands] = {++pendingCommandGenerations, lane};
@@ -2125,6 +2127,7 @@ VkCommandBuffer Recorder::SplitForRun() {
     if (open->sampleActive || open->segmentActive || open->renderPass.open || open->run.open) return open->commands;
     sealPrelude();
     const auto next = beginChunk();
+    DebugLabels::Close(open->commands);
     const auto ended = function(endCommandBuffer, "vkEndCommandBuffer")(open->commands);
     if (ended != VK_SUCCESS) {
         context.Function<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(context.device, poolOf(currentLane()), 1, &next);
@@ -2177,6 +2180,7 @@ void Recorder::sealPrelude() {
     // trailing barrier), the pristine copies to the copy-backs' diff kernels.
     recordBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     CountBarriers(CommandClass::StagingIn);
+    DebugLabels::Close(commands);
     Check(function(endCommandBuffer, "vkEndCommandBuffer")(commands), "vkEndCommandBuffer recorder prelude");
 }
 
@@ -5119,6 +5123,7 @@ void Recorder::Submit() {
             if (batch != nullptr && !batch->submitted) recorder.discard(std::move(batch));
         }
     } discardUnsubmitted{*this, batch};
+    DebugLabels::Close(batch->commands);
     Check(function(endCommandBuffer, "vkEndCommandBuffer")(batch->commands), "vkEndCommandBuffer recorder");
     VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     // The command buffers the batch split into (SplitForRun), in recording order.

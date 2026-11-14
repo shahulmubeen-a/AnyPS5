@@ -40,6 +40,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Screenshot.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DebugLabels.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
@@ -1233,6 +1234,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
             instanceExtensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
             state->swapchainColorSpaces = true;
         }
+        // APS5_DEBUG_LABELS: pass names as debug-utils labels for GPU tools (DebugLabels.hpp).
+        if (Graphics::DebugLabels::Enabled() && std::any_of(available.begin(), available.end(), [](const auto& item) { return std::strcmp(item.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0; })) {
+            instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
         create.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
         create.ppEnabledExtensionNames = instanceExtensions.data();
     }
@@ -1613,7 +1618,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     // without it resolves such draws on the CPU.
     state->drawIndirectCount = hasExtension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
     if (state->drawIndirectCount) deviceExtensions.push_back(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
-    state->memoryBudget = hasExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    // DEBUG (APS5_NO_MEMORY_BUDGET=1): the driver does not read VK_EXT_memory_budget, so its texture caches, pools and
+    // host-import budget keep their fixed sizes. For frame capture tools: Nsight Graphics takes about as much device
+    // memory as every live resource holds when a capture begins, the report then shows a full heap, the caches
+    // shrink to their floors and evict and re-create storage textures for the whole captured frame (17 GiB of
+    // vkAllocateMemory in one frame at Ghost of Yotei's title menu, all kept alive by the tool until the capture
+    // ends).
+    state->memoryBudget = hasExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) && std::getenv("APS5_NO_MEMORY_BUDGET") == nullptr;
+    if (std::getenv("APS5_NO_MEMORY_BUDGET") != nullptr) std::fprintf(stderr, "[vram] APS5_NO_MEMORY_BUDGET: VK_EXT_memory_budget reports are not read; cache and pool budgets stay fixed\n");
     // Guest memory is host memory: importing it lets address-based shaders use it in place instead of
     // copying every registered allocation per draw.
     if (hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && std::getenv("APS5_NO_HOST_IMPORT") == nullptr) {
@@ -5992,6 +6004,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     } else if (record.pushStages != 0) {
         context.Resolved(&Graphics::DeviceFunctions::cmdPushConstants, "vkCmdPushConstants")(commands, record.objects->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::ComputePushConstantBytes, record.pushBytes->data());
     }
+    Graphics::DebugLabels::Mark(context, commands);
     const auto gpuTiming = recorder.BeginGpuTiming(record.programAddress != 0 ? record.programAddress : record.shader->program->variantId);
     if (state->checkpointMarker != nullptr) state->checkpointMarker(commands, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(record.programAddress)));
     else if (Graphics::Recorder::ThreadLane() == 1) Graphics::Recorder::Checkpoint(commands, Graphics::Recorder::CheckpointKind::AsyncDispatch, record.programAddress);

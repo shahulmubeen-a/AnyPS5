@@ -213,6 +213,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TrackedAllocateMemory(VkDevice device, const VkMe
         Bump(state.vk[static_cast<std::size_t>(kind)], static_cast<std::int64_t>(info->allocationSize), 1);
         const auto owner = CurrentPoolTier() != Owner::None ? CurrentPoolTier() : CurrentOwner();
         Bump(OwnerMemorySlot(owner, kind), static_cast<std::int64_t>(info->allocationSize), 1);
+        Bump(OwnerAt(owner).made, static_cast<std::int64_t>(info->allocationSize), 1);
         std::lock_guard lock(state.memoryMutex);
         state.allocations[HandleKey(*memory)] = {info->allocationSize, kind, owner};
     }
@@ -315,6 +316,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TrackedCreateImage(VkDevice device, const VkImage
         Bump(Get().images, 0, 1);
         const auto owner = CurrentOwner();
         Bump(OwnerAt(owner).images, 0, 1);
+        Bump(OwnerAt(owner).madeImages, 0, 1);
         std::lock_guard lock(Get().objectMutex);
         Get().imageOwners[HandleKey(*image)] = owner;
     }
@@ -352,6 +354,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TrackedCreateBuffer(VkDevice device, const VkBuff
         Bump(Get().buffers, 0, 1);
         const auto owner = CurrentOwner();
         Bump(OwnerAt(owner).buffers, 0, 1);
+        Bump(OwnerAt(owner).madeBuffers, 0, 1);
         {
             std::lock_guard lock(Get().objectMutex);
             Get().bufferOwners[HandleKey(*buffer)] = owner;
@@ -776,6 +779,12 @@ void AppendOwners(std::string& line) {
     for (std::size_t i = 0; i < static_cast<std::size_t>(Owner::Count); ++i) {
         const auto& slots = OwnerAt(static_cast<Owner>(i));
         const auto name = std::string(OwnerNames[i]);
+        // made_<owner>: cumulative vkAllocateMemory MB(calls) since the start, madeimg_/madebuf_: cumulative
+        // vkCreateImage / vkCreateBuffer calls. The difference between two reports is the period's churn, which
+        // a frame capture tool keeps alive until the capture ends.
+        if (Live(slots.made.count) != 0) AppendMiB(line, ("made_" + name).c_str(), Live(slots.made.bytes), Live(slots.made.count));
+        if (Live(slots.madeImages.count) != 0) AppendCount(line, ("madeimg_" + name).c_str(), Live(slots.madeImages.count));
+        if (Live(slots.madeBuffers.count) != 0) AppendCount(line, ("madebuf_" + name).c_str(), Live(slots.madeBuffers.count));
         if (i == 0) {
             AppendMiB(line, "vk_device_unattributed", Live(slots.device.bytes), Live(slots.device.count));
             AppendCount(line, "vk_images_unattributed", Live(slots.images.count));

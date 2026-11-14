@@ -100,6 +100,9 @@ struct OwnerSlots {
     Slot buffers;     // live VkBuffers (count only)
     Slot liveDevice;  // live pooled device-local Buffer/DeviceBuffer objects (capacity bytes)
     Slot liveHost;    // live pooled host-visible Buffer objects (capacity bytes)
+    Slot made;        // every vkAllocateMemory charged to the owner since the start (never lowered): churn
+    Slot madeImages;  // every vkCreateImage under the owner since the start (count only)
+    Slot madeBuffers; // every vkCreateBuffer under the owner since the start (count only)
 };
 
 [[nodiscard]] inline OwnerSlots& OwnerAt(Owner owner) noexcept {

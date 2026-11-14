@@ -19,6 +19,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Elements.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DebugLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
@@ -2380,6 +2381,7 @@ struct IndirectRecord {
 // GPU-side indirect draw from `argumentBuffer` or the CPU-read records with the driver's rules.
 void recordDrawCommands(const Context& context, VkCommandBuffer commands, const State& state, const Pm4::DrawParameters& draw, const DrawInputs& inputs, const IndirectRecord* indirect, VkBuffer argumentBuffer, VkDeviceSize argumentOffset, const DrawTraceContext* trace, std::uint32_t& subdraw, std::uint32_t firstIndex = 0) {
     if (context.recorder != nullptr) context.recorder->NoteSampledDraw(commands);
+    DebugLabels::Mark(context, commands);
     Recorder::Checkpoint(commands, Recorder::CheckpointKind::Draw, Recorder::CurrentWriteOrigin());
     const auto recorded = [&](std::uint32_t index) {
         if (trace != nullptr && context.recorder != nullptr) {
