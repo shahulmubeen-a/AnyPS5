@@ -113,6 +113,7 @@ constexpr std::array<const char*, SwitchCount> SwitchNames{
     "APS5_NO_LAND_WAITS",
     "APS5_RESOLVE_BEFORE_WAIT",
     "APS5_RESOLVE_THROUGH_WAITS",
+    "APS5_NO_SLICE_HTILE_EXPANSION",
 };
 
 struct Refusal {

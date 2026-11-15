@@ -115,6 +115,7 @@ enum class RuntimeSwitch : std::size_t {
     NoLandWaits,
     ResolveBeforeWait,
     ResolveThroughWaits,
+    NoSliceHtileExpansion,
     Count,
 };
 

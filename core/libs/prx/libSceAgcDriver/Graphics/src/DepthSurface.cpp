@@ -2068,7 +2068,12 @@ std::optional<std::pair<VkImageAspectFlags, std::uint32_t>> KnownHtileExpansion(
         return std::pair<VkImageAspectFlags, std::uint32_t>{cleared, cleared != 0 ? expandedHtileWord(value, target.htileStencil, cleared) : value};
     }
     if ((mask & 0xfu) != 0 || (value & 0xfu) != 0) return std::nullopt;
-    if (target.firstSlice != 0 && mask != 0) return std::nullopt;
+    // A depth-only HTILE (no stencil fields) whose mask clear leaves zmask 0 in every word reads back as cleared
+    // whatever the words were, on any array slice: the store-back's CPU path (storeBackClearedHtile) looks at
+    // nothing else and writes 0xfffc000f to every word. Ghost of Yotei clears its shadow slices (slices 19-241,
+    // mask 0x3f0) this way; refusing them made the committer wait for the GPU twice per frame (12-17 ms each,
+    // 2026-11-15). APS5_NO_SLICE_HTILE_EXPANSION (runtime switch) refuses slices other than 0 as before.
+    if (target.firstSlice != 0 && mask != 0 && (target.htileStencil || RuntimeSwitches::Set(RuntimeSwitch::NoSliceHtileExpansion))) return std::nullopt;
     if (!target.htileStencil) return std::pair<VkImageAspectFlags, std::uint32_t>{VK_IMAGE_ASPECT_DEPTH_BIT, 0xfffc000fu};
     if ((mask & 0x300u) != 0) return std::nullopt;
     if (((value >> 8u) & 0x3u) == 0) return std::pair<VkImageAspectFlags, std::uint32_t>{VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0xfffff3ffu};
@@ -2534,6 +2539,31 @@ std::size_t HtileStoreBackWaits(const Context& context, const DepthTarget& targe
                 if (const auto found = gpu.fills.find(recorder); found != gpu.fills.end()) fill = static_cast<bool>(found->second);
             }
             if (write.has_value() && fill && KnownHtileExpansion(*write, target).has_value()) return 0;
+            // APS5_TRACE_HTILE_WAITS=<n>: why the first n store-backs wait (the newest pending write is no noted
+            // mask write over the whole range, no GPU fill is set, or the expansion is not known).
+            static const int traced = [] { const char* text = std::getenv("APS5_TRACE_HTILE_WAITS"); return text != nullptr ? std::atoi(text) : 0; }();
+            static std::atomic<int> shown{0};
+            if (traced != 0 && shown.fetch_add(1, std::memory_order_relaxed) < traced) {
+                std::string overlapping;
+                {
+                    std::lock_guard lock(gpu.mutex);
+                    for (const auto& mask : gpu.masks) {
+                        if (mask.begin >= target.htileAddress + bytes || target.htileAddress >= mask.end) continue;
+                        char item[112];
+                        std::snprintf(item, sizeof(item), " [0x%llx+0x%llx note %llu m 0x%x v 0x%x]", static_cast<unsigned long long>(mask.begin), static_cast<unsigned long long>(mask.end - mask.begin), static_cast<unsigned long long>(mask.note), mask.mask, mask.value);
+                        overlapping += item;
+                    }
+                }
+                std::string pending;
+                for (const auto& pendingWrite : recorder->PendingWritesOver(target.htileAddress, bytes)) {
+                    char item[96];
+                    std::snprintf(item, sizeof(item), " [0x%llx+0x%llx note %llu]", static_cast<unsigned long long>(pendingWrite.begin), static_cast<unsigned long long>(pendingWrite.end - pendingWrite.begin), static_cast<unsigned long long>(pendingWrite.note));
+                    pending += item;
+                }
+                char writer[160] = "unattributed";
+                if (const auto origin = Recorder::OriginOfNote(newest)) std::snprintf(writer, sizeof(writer), "q0x%x op 0x%02x prog 0x%llx 0x%llx+0x%llx%s", origin->queue, origin->opcode & 0xffffu, static_cast<unsigned long long>(origin->program), static_cast<unsigned long long>(origin->begin), static_cast<unsigned long long>(origin->end - origin->begin), origin->kernel ? " mask-kernel" : "");
+                std::fprintf(stderr, "[htile-wait] 0x%llx+0x%zx slice %u stencil %d: newest note %llu by %s, mask write %s, GPU fill %s; masks over it:%s; pending writes:%s\n", static_cast<unsigned long long>(target.htileAddress), bytes, target.firstSlice, target.htileStencil ? 1 : 0, static_cast<unsigned long long>(newest), writer, write.has_value() ? "found" : "none", fill ? "set" : "unset", overlapping.empty() ? " none" : overlapping.c_str(), pending.empty() ? " none" : pending.c_str());
+            }
         }
     }
     return bytes;
