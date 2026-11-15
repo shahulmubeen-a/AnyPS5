@@ -815,6 +815,8 @@ public:
     // queries around each timed range; the totals per key are reported every 10 s. Begin returns the
     // range index to pass to End, or NoTiming when timing is off or the batch's queries are used up.
     static constexpr std::uint32_t NoTiming = 0xffffffffu;
+    // APS5_DEBUG_LABELS=2 with timing off: the range is only a debug-utils label (DebugLabels::BeginClass).
+    static constexpr std::uint32_t LabelOnlyTiming = 0xfffffffeu;
     static bool GpuTimingEnabled();
     static bool BatchStampsEnabled();
     std::uint32_t BeginGpuTiming(std::uint64_t key);

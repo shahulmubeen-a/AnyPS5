@@ -13,6 +13,9 @@ void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* fu
 std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags = 0);
 void Reserve(CommandBuffer* buffer, std::uint32_t count, const char* function);
 std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* function);
+// Whether the latest allocation in the buffer's storage ended past this buffer's cursor: the buffer is a copy taken
+// before packets another copy wrote since (Marker.cpp).
+bool CursorBehindLatestAllocation(const CommandBuffer* buffer);
 std::uint32_t* Emit(CommandBuffer* buffer, std::uint32_t opcode, std::initializer_list<std::uint32_t> payload, const char* function);
 void ValidatePacket(const std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function);
 std::uint32_t* WriteNop(CommandBuffer* buffer, std::uint32_t count, const char* function);

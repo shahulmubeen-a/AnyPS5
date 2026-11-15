@@ -166,6 +166,35 @@ private:
 }
 #endif
 
+namespace {
+
+// Where the latest allocation in a command buffer's storage ended, by storage start (CommandBuffer::bottom): copies of
+// one CommandBuffer share the storage but not the cursor. A slot is overwritten by another storage that hashes to it.
+struct LatestAllocation {
+    std::atomic<const std::uint32_t*> bottom{nullptr};
+    std::atomic<const std::uint32_t*> end{nullptr};
+};
+
+std::array<LatestAllocation, 4096>& latestAllocations() {
+    static std::array<LatestAllocation, 4096> slots{};
+    return slots;
+}
+
+LatestAllocation& latestAllocation(const std::uint32_t* bottom) {
+    return latestAllocations()[(reinterpret_cast<std::uintptr_t>(bottom) >> 6u) % 4096u];
+}
+
+}
+
+bool CursorBehindLatestAllocation(const CommandBuffer* buffer) {
+    // A buffer at its start was reset (or is new): its first packet goes where the storage begins, whatever was there.
+    if (buffer == nullptr || buffer->bottom == nullptr || buffer->cursor_up == buffer->bottom) return false;
+    const auto& slot = latestAllocation(buffer->bottom);
+    if (slot.bottom.load(std::memory_order_acquire) != buffer->bottom) return false;
+    const auto* end = slot.end.load(std::memory_order_acquire);
+    return end > buffer->cursor_up && end <= buffer->top;
+}
+
 std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* function) {
 #if defined(__linux__) || defined(_WIN32)
     const CommandBufferRaceGuard guard(buffer, function);
@@ -174,6 +203,9 @@ std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* 
     auto* result = buffer->cursor_up;
     AgcDriverPrepareCommandWrite_nid_no_patch(reinterpret_cast<std::uint64_t>(result), static_cast<std::size_t>(count) * sizeof(std::uint32_t));
     buffer->cursor_up += count;
+    auto& slot = latestAllocation(buffer->bottom);
+    slot.end.store(buffer->cursor_up, std::memory_order_release);
+    slot.bottom.store(buffer->bottom, std::memory_order_release);
     return result;
 }
 

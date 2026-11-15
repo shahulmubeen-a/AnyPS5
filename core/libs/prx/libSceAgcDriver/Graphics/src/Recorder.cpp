@@ -2966,7 +2966,13 @@ void Recorder::AddGpuTiming(CommandClass which, double nanoseconds, std::uint64_
 }
 
 std::uint32_t Recorder::BeginGpuTiming(std::uint64_t key) {
-    if (!GpuTimingEnabled()) return NoTiming;
+    if (!GpuTimingEnabled()) {
+        if (DebugLabels::Level() >= 2 && open != nullptr && key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::DispatchLeading) + CommandClasses) {
+            const auto which = static_cast<CommandClass>(key - ClassKey(CommandClass::DispatchLeading));
+            if (which != CommandClass::Draw && which != CommandClass::DispatchLeading && which != CommandClass::DispatchTrailing && DebugLabels::BeginClass(context, open->commands, CommandClassNames[key - ClassKey(CommandClass::DispatchLeading)])) return LabelOnlyTiming;
+        }
+        return NoTiming;
+    }
     Commands();
     return beginTiming(key);
 }
@@ -3005,6 +3011,10 @@ std::uint32_t Recorder::beginTiming(std::uint64_t key) {
 }
 
 void Recorder::EndGpuTiming(std::uint32_t index, std::uint64_t bytes) {
+    if (index == LabelOnlyTiming) {
+        DebugLabels::EndClass();
+        return;
+    }
     if (index == NoTiming || open == nullptr || open->queries == VK_NULL_HANDLE) return;
     if (index < open->timedBytes.size()) open->timedBytes[index] += bytes;
     context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(open->commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, open->queries, index * 2 + 1);

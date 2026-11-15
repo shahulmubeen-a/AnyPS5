@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 // DEBUG (APS5_DEBUG_LABELS=1, with APS5_ELEM=1 or APS5_ELEM_FILE): the title's pass names reach the Vulkan command
 // stream as VK_EXT_debug_utils labels, so GPU tools (Nsight Graphics GPU Trace and Graphics Capture, RenderDoc) show
@@ -33,12 +35,26 @@ struct Provider {
     return enabled;
 }
 
+// APS5_DEBUG_LABELS=2 also labels the driver's own command classes (Recorder::CommandClass: staging copies, storage
+// uploads and write-backs, shadow publishes, fills, copies, ...) as "aps5:<class>" ranges, so a GPU tool attributes
+// their dispatches, stalls and bus traffic. A class range is flat: it ends the open pass label, and the next draw or
+// dispatch begins its pass label again.
+[[nodiscard]] inline int Level() noexcept {
+    static const int level = [] {
+        const char* value = std::getenv("APS5_DEBUG_LABELS");
+        return value == nullptr ? 0 : std::max(1, std::atoi(value));
+    }();
+    return level;
+}
+
 namespace Detail {
 struct State {
     std::mutex mutex;
     Provider provider;
     // Open label per command buffer being recorded (absent: none open).
     std::unordered_map<VkCommandBuffer, std::uint32_t> open;
+    // Nesting depth of class ranges per command buffer (only the outermost is a label).
+    std::unordered_map<VkCommandBuffer, std::uint32_t> classes;
     std::unordered_map<std::uint32_t, std::string> texts;
     VkDevice device = VK_NULL_HANDLE;
     PFN_vkCmdBeginDebugUtilsLabelEXT begin = nullptr;
@@ -85,6 +101,7 @@ inline void Begun(VkCommandBuffer commands) {
     auto& state = Detail::Get();
     std::lock_guard lock(state.mutex);
     state.open.erase(commands);
+    state.classes.erase(commands);
 }
 
 // Before a draw or dispatch is recorded into `commands`.
@@ -92,6 +109,7 @@ inline void Mark(const Context& context, VkCommandBuffer commands) {
     if (!Detail::Armed().load(std::memory_order_acquire)) return;
     auto& state = Detail::Get();
     std::lock_guard lock(state.mutex);
+    if (state.classes.contains(commands)) return;
     const auto slot = state.provider.current();
     if (slot == ~0u) return;
     const auto found = state.open.find(commands);
@@ -112,10 +130,54 @@ inline void Close(VkCommandBuffer commands) {
     if (!Detail::Armed().load(std::memory_order_acquire)) return;
     auto& state = Detail::Get();
     std::lock_guard lock(state.mutex);
+    if (state.classes.erase(commands) != 0 && state.end != nullptr) state.end(commands);
     const auto found = state.open.find(commands);
     if (found == state.open.end()) return;
     if (state.end != nullptr) state.end(commands);
     state.open.erase(found);
+}
+
+namespace Detail {
+inline std::vector<VkCommandBuffer>& ClassStack() {
+    thread_local std::vector<VkCommandBuffer> stack;
+    return stack;
+}
+}
+
+// Recorder::BeginGpuTiming for a command class (APS5_DEBUG_LABELS=2): true when EndClass is owed.
+inline bool BeginClass(const Context& context, VkCommandBuffer commands, const char* name) {
+    if (!Detail::Armed().load(std::memory_order_acquire) || commands == VK_NULL_HANDLE) return false;
+    auto& state = Detail::Get();
+    std::lock_guard lock(state.mutex);
+    if (!Detail::Resolve(state, context)) return false;
+    auto& depth = state.classes[commands];
+    if (depth++ == 0) {
+        if (const auto found = state.open.find(commands); found != state.open.end()) {
+            state.end(commands);
+            state.open.erase(found);
+        }
+        thread_local std::string text;
+        text.assign("aps5:").append(name);
+        VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+        label.pLabelName = text.c_str();
+        state.begin(commands, &label);
+    }
+    Detail::ClassStack().push_back(commands);
+    return true;
+}
+
+inline void EndClass() {
+    auto& stack = Detail::ClassStack();
+    if (stack.empty()) return;
+    const auto commands = stack.back();
+    stack.pop_back();
+    auto& state = Detail::Get();
+    std::lock_guard lock(state.mutex);
+    const auto found = state.classes.find(commands);
+    if (found == state.classes.end()) return;
+    if (--found->second != 0) return;
+    state.classes.erase(found);
+    if (state.end != nullptr) state.end(commands);
 }
 
 }
