@@ -691,6 +691,31 @@ void Driver::execute(const Submission& submission) {
         } else if (opcode == 0x3c || opcode == 0x93) {
             static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
             const auto waitStart = traceGpu ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            // APS5_RESOLVE_BEFORE_WAIT (runtime switch): a compute queue resolves the dispatch group behind a wait
+            // before it waits, not when the wait passes. The resolve is CPU work (capture + materialize) whose
+            // results a dispatch adopts only while its captured memory still compares equal (CapturedCurrent), so
+            // doing it early changes nothing that is dispatched; it moves the work into the time the queue waits
+            // for the label anyway. In Ghost of Yotei's open world queue 0x30 resolved program 0x80001df900 twice
+            // per frame after its wait passed (~38 ms), and queue 0 waited for the label behind it. Alone it gains
+            // nothing there (run rw-w: the queue reaches that wait only when queue 0 already waits); with
+            // APS5_RESOLVE_THROUGH_WAITS the run goes on behind later waits until this wait would pass, which
+            // resolves those dispatches while the queue waits for an earlier label (+1.8-3.3 %, run rt-w).
+            if (submission.queue != 0 && header != RenderingWaitPacketHeader && Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::ResolveBeforeWait)) {
+                auto groupStart = nextCursor;
+                while (groupStart < submission.commands.size() && Pm4::FillerPacket(submission.commands[groupStart])) ++groupStart;
+                // Whether this wait would pass now, without waiting: its memory compares, a store of this submission's
+                // time is noted, or the label table holds a passing value (what waitMemory tries first).
+                const std::size_t awaitedBytes = Pm4::WaitAwaitedBytes(packet);
+                const std::uint64_t awaited = (packet[2] & (awaitedBytes == 8 ? ~7u : ~3u)) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(awaited), awaitedBytes, awaitedBytes);
+                const std::function<bool()> waitPasses = [&] {
+                    if (Pm4::WaitSatisfiedUnchecked(packet)) return true;
+                    if (storedSince(packet, awaited, awaitedBytes, submission.received)) return true;
+                    const auto hit = Graphics::Recorder::LookupLabel(awaited, awaitedBytes, submission.received);
+                    return hit.has_value() && Pm4::WaitComparesValue(packet, hit->value);
+                };
+                if (groupStart < submission.commands.size()) timed(&WorkerProfile::dispatchMs, [&] { resolveGroupAhead(submission, queue, groupStart, Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::ResolveThroughWaits), &waitPasses); });
+            }
             timed(&WorkerProfile::waitMs, [&] { waitMemory(packet, submission.queue, recent, submission.received, submission.heldAtSubmit.contains(cursor)); });
             gateOpened() = true;
             if (traceGpu && std::chrono::steady_clock::now() - waitStart > std::chrono::milliseconds(200)) {

@@ -110,6 +110,9 @@ constexpr std::array<const char*, SwitchCount> SwitchNames{
     "APS5_DEFER_LABEL_STORE",
     "APS5_INDIRECT_LABEL_ARGUMENTS",
     "APS5_READ_ONLY_BDA_ITEMS",
+    "APS5_NO_LAND_WAITS",
+    "APS5_RESOLVE_BEFORE_WAIT",
+    "APS5_RESOLVE_THROUGH_WAITS",
 };
 
 struct Refusal {

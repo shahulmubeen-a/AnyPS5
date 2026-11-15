@@ -112,6 +112,9 @@ enum class RuntimeSwitch : std::size_t {
     DeferLabelStore,
     IndirectLabelArguments,
     ReadOnlyBdaItems,
+    NoLandWaits,
+    ResolveBeforeWait,
+    ResolveThroughWaits,
     Count,
 };
 

@@ -665,6 +665,8 @@ struct DrawProfile {
     AgcDriver::Mutex mutex;
     std::array<double, KindCount> kindUs{};
     std::array<std::uint64_t, KindCount> kindCounts{};
+    // Phase totals per kind, for the [draw-kinds] line (which phases an address-based draw spends its time in).
+    std::array<std::array<double, PhaseCount>, KindCount> kindPhaseUs{};
     std::uint64_t fullScissorLookups = 0;
     std::uint64_t partialLookups = 0;
     std::uint64_t pagesWalked = 0;
@@ -794,6 +796,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     if (outcome.kind < KindCount) {
         ++profile.kindCounts[outcome.kind];
         profile.kindUs[outcome.kind] += drawUs;
+        for (std::size_t i = 0; i < PhaseCount; ++i) profile.kindPhaseUs[outcome.kind][i] += us[i];
     }
     if (outcome.validateMemoized) ++(outcome.validateHit ? profile.validateHits : profile.validateMisses);
     if (!ProfileWindows::ClockDue(profile.lastReport)) return;
@@ -886,8 +889,28 @@ void printDrawWindow(DrawProfile& profile, const char* window) {
     profile.slowLookupUs = 0;
     profile.fullScissorLookups = profile.partialLookups = profile.pagesWalked = 0;
     profile.lookupUs = 0;
+    {
+        std::string kinds = "[draw-kinds] average us per draw by phase (";
+        kinds += window;
+        kinds += "):";
+        for (std::size_t kind = 0; kind < KindCount; ++kind) {
+            if (profile.kindCounts[kind] == 0) continue;
+            char text[96];
+            std::snprintf(text, sizeof(text), " | %s x%llu:", DrawKindNames[kind], static_cast<unsigned long long>(profile.kindCounts[kind]));
+            kinds += text;
+            for (std::size_t i = 0; i < PhaseCount; ++i) {
+                const auto each = profile.kindPhaseUs[kind][i] / static_cast<double>(profile.kindCounts[kind]);
+                if (each < 0.5) continue;
+                std::snprintf(text, sizeof(text), " %s=%.1f", DrawPhaseNames[i], each);
+                kinds += text;
+            }
+        }
+        kinds += "\n";
+        std::fputs(kinds.c_str(), stderr);
+    }
     profile.kindUs.fill(0);
     profile.kindCounts.fill(0);
+    for (auto& phases : profile.kindPhaseUs) phases.fill(0);
     profile.cacheHits = profile.cacheMisses = profile.cacheInvalidated = profile.uncacheable = 0;
     profile.validateHits = profile.validateMisses = 0;
     profile.recipeHits = 0;

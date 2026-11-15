@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 #include <cstdlib>
 #include <mutex>
@@ -79,6 +80,16 @@ void Driver::notePendingWait(std::span<const std::uint32_t> packet, std::uint32_
 void Driver::landPendingWaits(std::uint32_t queue) {
     auto& waits = pendingWaits();
     if (waits.empty()) return;
+    // APS5_NO_LAND_WAITS (runtime switch, an experiment): a wait passed on another queue's recorded label store is
+    // not landed, as on queue 0. The landing keeps the guest's timing (a title that fills memory behind such a wait
+    // after it submits the buffer), so this can read such memory early. In Ghost of Yotei's open world the landings
+    // cost queues 0x30 and 0x38 about 1 s per 10 s each. Alone the switch changes nothing (2026-11-15, run lw-w:
+    // the queues then spend the time resolving their dispatch groups); with APS5_RESOLVE_THROUGH_WAITS queue 0's
+    // label waits fall from ~1,050 to ~300 ms per 10 s and the world gains 5.7-7.5 % (run rt-w).
+    if (Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::NoLandWaits)) {
+        waits.clear();
+        return;
+    }
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     struct LandStats {
         std::uint64_t lands = 0, waited = 0;

@@ -388,7 +388,7 @@ private:
     static std::size_t& currentPacketOffset();
     static bool& resolvingAhead();
     static bool& gateOpened();
-    void resolveGroupAhead(const Submission& submission, const QueueState& live, std::size_t from);
+    void resolveGroupAhead(const Submission& submission, const QueueState& live, std::size_t from, bool throughWaits = false, const std::function<bool()>* stop = nullptr);
     static MissAheadPlan*& missAheadPlan();
     static MissAheadLedger& missAheadLedger();
     static MissAheadKnown& missAheadKnown();

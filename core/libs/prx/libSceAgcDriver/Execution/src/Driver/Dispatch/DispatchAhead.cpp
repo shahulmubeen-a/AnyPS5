@@ -131,7 +131,7 @@ bool OverlapsLabel(std::span<const ShaderRecompiler::MemoryRegion> regions, cons
 
 }
 
-void Driver::resolveGroupAhead(const Submission& submission, const QueueState& live, std::size_t from) {
+void Driver::resolveGroupAhead(const Submission& submission, const QueueState& live, std::size_t from, bool throughWaits, const std::function<bool()>* stop) {
     static const bool allQueues = std::getenv("APS5_GROUP_CAPTURE_ALL_QUEUES") != nullptr;
     if (!allQueues && submission.queue == 0) return;
     auto& resolved = resolvedAhead();
@@ -259,6 +259,7 @@ void Driver::resolveGroupAhead(const Submission& submission, const QueueState& l
             }
         }
     }
+    bool behindOpenWait = false;
     for (std::size_t cursor = from; cursor < commands.size();) {
         const auto header = commands[cursor];
         if (Pm4::FillerPacket(header)) {
@@ -272,9 +273,18 @@ void Driver::resolveGroupAhead(const Submission& submission, const QueueState& l
         const auto next = cursor + count;
         if (header == FlipPacketHeader || header == RenderingWaitPacketHeader || opcode == 0x22 || (Pm4::Predicated(header) && scratch.predication.operation != 0)) break;
         if (opcode == 0x3c || opcode == 0x93) {
-            if (!Pm4::WaitSatisfiedUnchecked(packet) && !WrittenByRun(packet, labels)) break;
+            // throughWaits (APS5_RESOLVE_THROUGH_WAITS): the run goes on behind a wait that has not passed, so the
+            // groups behind later waits are resolved while the queue still waits for an earlier one. Nothing is
+            // dispatched here, and a dispatch adopts its result only while the captured memory still compares
+            // equal and its arguments re-read the same. `stop` (the caller's wait has passed) ends the run before
+            // the next dispatch behind such a wait, so the queue is not kept from work that is due.
+            if (!Pm4::WaitSatisfiedUnchecked(packet) && !WrittenByRun(packet, labels)) {
+                if (!throughWaits) break;
+                behindOpenWait = true;
+            }
         } else if (opcode == 0x15 || opcode == 0x16) {
             if (count < (opcode == 0x15 ? 5u : 3u) || resolved.contains(cursor)) break;
+            if (behindOpenWait && stop != nullptr && (*stop)()) break;
             if (opcode == 0x16) {
                 std::uint64_t arguments = 0;
                 try {
