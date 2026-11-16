@@ -108,7 +108,10 @@ elseif(CLANG OR GCC)
 	else()
 		set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -fno-exceptions -fdiagnostics-color=always -finput-charset=UTF-8 -fexec-charset=UTF-8 -static-libgcc -static-libstdc++ -g -fno-strict-aliasing -fno-omit-frame-pointer -Wall -Wno-unused-value -fmessage-length=0")
 	endif()
-	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -march=x86-64-v3 -ffp-contract=off")
+	# KYTY_MARCH (default x86-64-v3): the -march of the build. A build for one machine can name its processor
+	# (znver4, native); such a DLL does not start on processors without those instructions.
+	set(KYTY_MARCH "x86-64-v3" CACHE STRING "The -march value kyty_gpu is compiled for")
+	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} -march=${KYTY_MARCH} -ffp-contract=off")
 	if (WIN32 AND GCC)
 		# MinGW GCC keeps the stack 16-byte aligned but spills AVX registers with aligned moves (GCC PR 54412): a
 		# vmovdqa ymm to [rbp-0x60] faulted in Swapchain::Submit at start. The assembler turns every aligned vector move

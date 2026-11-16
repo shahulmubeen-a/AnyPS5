@@ -11,6 +11,7 @@ set(APS5_KYTY_PGO "AUTO" CACHE STRING "Profile-guided optimisation of kyty_gpu.p
 set_property(CACHE APS5_KYTY_PGO PROPERTY STRINGS AUTO OFF GEN USE)
 set(APS5_KYTY_PGO_PROFILE "${CMAKE_SOURCE_DIR}/core/kyty_gpu/pgo/kyty_gpu.profdata" CACHE FILEPATH "The profile APS5_KYTY_PGO=USE builds with")
 set(APS5_KYTY_PGO_DIR "${CMAKE_BINARY_DIR}/kyty_gpu/pgo" CACHE PATH "Where an APS5_KYTY_PGO=GEN kyty_gpu.prx writes its .profraw files")
+set(APS5_KYTY_MARCH "x86-64-v3" CACHE STRING "The -march value kyty_gpu.prx is compiled for (x86-64-v3 runs on every host AnyPS5 supports)")
 option(APS5_KYTY_PGO_WARN_MISSING "List the functions the profile has no data for while building kyty_gpu.prx" OFF)
 set(APS5_KYTY_GPU_JOBS "" CACHE STRING "Parallel jobs of the kyty_gpu build; empty: the build tool's default")
 set(APS5_KYTY_GPU_COMPILER_LAUNCHER "" CACHE STRING "Compiler launcher (ccache) of the kyty_gpu build; empty: none")
@@ -112,6 +113,7 @@ ExternalProject_Add(kyty_gpu
         -DKYTY_PGO_PROFILE:FILEPATH=${APS5_KYTY_PGO_PROFILE}
         -DKYTY_PGO_DIR:PATH=${APS5_KYTY_PGO_DIR}
         -DKYTY_PGO_WARN_MISSING:BOOL=${APS5_KYTY_PGO_WARN_MISSING}
+        -DKYTY_MARCH:STRING=${APS5_KYTY_MARCH}
     BUILD_COMMAND ${kytyGpuBuild}
     BUILD_ALWAYS ON
     BUILD_BYPRODUCTS "${kytyGpuBinary}/deploy/kyty_gpu.prx"
