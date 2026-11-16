@@ -589,7 +589,10 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
         const auto target = req.cfg->lastFlipVblank + interval;
         timing.Mark("validate");
-        req.cfg->vblankCond.wait(lock, req.cfg->shutdownToken, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
+        // Experiment (APS5_FLIP_IMMEDIATE=1): a ready flip is presented at once instead of at the next vblank tick, so a
+        // frame that takes a little more than n ticks is not rounded up to n + 1. The vblank events keep their rate.
+        static const bool immediateFlip = std::getenv("APS5_FLIP_IMMEDIATE") != nullptr;
+        if (!immediateFlip) req.cfg->vblankCond.wait(lock, req.cfg->shutdownToken, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
         timing.Mark("vblank_wait");
         req.cfg->CheckAlive();
         if (req.cfg->Closed()) {
@@ -790,9 +793,17 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
 void VideoOutDriver::vblankLoop(std::stop_token token) {
     using Frame = std::chrono::duration<int64_t, std::ratio<1001, 120000>>;
     const auto start = std::chrono::steady_clock::now();
+    // Experiment (APS5_VBLANK_RATE_SCALE=<n>, 1..8): the vblank clock ticks n times as fast, so flips wait for a tick of
+    // 1/(59.94 n) s. A title that counts vblanks as time runs fast with it.
+    const int64_t rateScale = [] {
+        const char* value = std::getenv("APS5_VBLANK_RATE_SCALE");
+        const int parsed = value != nullptr ? std::atoi(value) : 1;
+        return static_cast<int64_t>(parsed < 1 ? 1 : parsed > 8 ? 8 : parsed);
+    }();
+    if (rateScale != 1) std::fprintf(stderr, "[videoout] APS5_VBLANK_RATE_SCALE=%lld: vblank clock at %.2f Hz\n", static_cast<long long>(rateScale), 59.94 * static_cast<double>(rateScale));
     try {
         for (int64_t frame = 1; !token.stop_requested(); ++frame) {
-            const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(Frame(frame));
+            const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(Frame(frame)) / rateScale;
             const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(next - std::chrono::steady_clock::now()).count();
             if (remaining > 0) PreciseSleepUs(static_cast<unsigned long long>(remaining));
             {
